@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "inside-me"
+version = "0.1.0"
+description = "中之我 — 本地自我蒸馏：聊天记录解析、画像、对话与 AgentSkills 输出"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Inside-ME" }]
+dependencies = [
+  "fastapi>=0.115.0",
+  "uvicorn[standard]>=0.32.0",
+  "python-multipart>=0.0.12",
+  "pydantic>=2.9.0",
+  "pydantic-settings>=2.6.0",
+  "chromadb>=0.5.0",
+  "typer>=0.12.0",
+  "httpx>=0.27.0",
+  "pyyaml>=6.0.0",
+  "python-dateutil>=2.9.0",
+]
+
+[project.optional-dependencies]
+dev = ["ruff>=0.7.0", "pytest>=8.0.0"]
+
+[project.scripts]
+inside-me = "inside_me.cli:app"
+
+[tool.setuptools.package-dir]
+"" = "src"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]

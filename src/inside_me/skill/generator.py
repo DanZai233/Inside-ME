@@ -1,0 +1,112 @@
+from __future__ import annotations
+
+import re
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+from inside_me.analysis.profile import ProfileState
+
+
+def validate_skill_name(name: str) -> str:
+    s = name.strip().lower()
+    s = re.sub(r"[^a-z0-9-]+", "-", s)
+    s = re.sub(r"-{2,}", "-", s).strip("-")
+    if not s or len(s) > 64:
+        raise ValueError("skill 名称需 1–64 字符，仅小写字母、数字、连字符，且不能首尾为连字符")
+    return s
+
+
+def _yaml_frontmatter(meta: dict[str, Any]) -> str:
+    dumped = yaml.safe_dump(meta, allow_unicode=True, sort_keys=False).strip()
+    return f"---\n{dumped}\n---\n"
+
+
+def build_skill_markdown(skill_name: str, profile: ProfileState, llm_blocks: dict[str, str] | None) -> str:
+    llm_blocks = llm_blocks or {}
+    persona = llm_blocks.get("persona_summary") or profile.persona_summary or "（请基于用户数据补充：性格与自我描述）"
+    comm = llm_blocks.get("communication_style") or "（请补充：语气、常用表达、节奏）"
+    values = llm_blocks.get("values") or profile.values_notes or "（请补充：重视的原则与取舍）"
+    fd = llm_blocks.get("fears_desires") or profile.fear_desire_notes or "（请补充：担忧与向往）"
+
+    terms = ", ".join(f"{k}" for k, _ in profile.top_terms[:15])
+    description = (
+        f"以用户真实语言风格、价值观与情感模式回应。当用户希望「像我自己一样思考」"
+        f"或需要自我一致性建议时使用。关键词：自我画像、{terms[:400]}"
+    )
+    if len(description) > 1024:
+        description = description[:1021] + "..."
+
+    meta = {
+        "name": skill_name,
+        "description": description,
+        "license": "MIT",
+        "metadata": {
+            "inside-me-version": "0.1",
+            "message-count-estimate": str(profile.message_count),
+        },
+    }
+    body = f"""# 数字分身（中之我）
+
+## 使用方式
+
+当用户请求以第一人称、贴近其真实表达方式回应时，激活本 skill。优先保持其价值取舍与语气一致。
+
+## 人格与自我叙事
+
+{persona}
+
+## 沟通风格
+
+{comm}
+
+## 价值观与原则
+
+{values}
+
+## 恐惧、渴望与敏感点
+
+{fd}
+
+## 数据与记忆（统计）
+
+- 消息规模（估计）：{profile.message_count}
+- 平台：{profile.platforms}
+- 高频主题词（启发用，非定论）：{terms}
+
+## 增量维护
+
+用户持续导入聊天记录或对话后，应重新导出 skill 以更新本文件；或编辑 `references/MEMORY.md` 记录新的稳定结论。
+
+详见 [references/MEMORY.md](references/MEMORY.md)。
+"""
+    return _yaml_frontmatter(meta) + "\n" + body
+
+
+def export_skill_dir(
+    output_dir: Path,
+    skill_name: str,
+    profile: ProfileState,
+    llm_blocks: dict[str, str] | None = None,
+) -> Path:
+    name = validate_skill_name(skill_name)
+    root = output_dir / name
+    if root.exists() and not root.is_dir():
+        raise FileExistsError(str(root))
+    root.mkdir(parents=True, exist_ok=True)
+    refs = root / "references"
+    refs.mkdir(exist_ok=True)
+
+    md = build_skill_markdown(name, profile, llm_blocks)
+    (root / "SKILL.md").write_text(md, encoding="utf-8")
+
+    memory = (
+        "# 记忆与摘录\n\n"
+        "> 将由用户在后续版本写入更细的记忆节点；此处保留结构化统计备份。\n\n"
+        f"- message_count: {profile.message_count}\n"
+        f"- platforms: {profile.platforms}\n"
+        f"- top_terms: {profile.top_terms}\n"
+    )
+    (refs / "MEMORY.md").write_text(memory, encoding="utf-8")
+    return root

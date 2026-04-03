@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# Data & local state (user chat / vectors)
+data/
+.inside-me/
+
+# Node
+node_modules/
+frontend/dist/
+*.log
+frontend/tsconfig.tsbuildinfo
+
+# Env
+.env
+.env.local
+
+# OS
+.DS_Store
