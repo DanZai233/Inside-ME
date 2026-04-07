@@ -58,18 +58,124 @@ export async function importFile(file: File): Promise<{ imported: number; platfo
   return r.json();
 }
 
+export type RagHit = {
+  id: string;
+  text: string;
+  preview: string;
+  sender: string;
+  platform: string;
+  ts: string;
+  distance: number | null;
+};
+
+export async function fetchRagPreview(query: string, n = 8): Promise<{ rag_hits: RagHit[] }> {
+  const r = await fetch("/api/chat/rag-preview", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ query, n }),
+  });
+  if (!r.ok) throw new Error(await parseError(r));
+  return r.json();
+}
+
 export async function chat(
   messages: ChatMessage[],
   useRag: boolean,
   chatMode: "default" | "interview" = "default",
-): Promise<{ reply: string }> {
+  pinnedContext: string | null = null,
+  persistToMemory = true,
+): Promise<{ reply: string; rag_hits: RagHit[] }> {
   const r = await fetch("/api/chat", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ messages, use_rag: useRag, chat_mode: chatMode }),
+    body: JSON.stringify({
+      messages,
+      use_rag: useRag,
+      chat_mode: chatMode,
+      pinned_context: pinnedContext || null,
+      persist_to_memory: persistToMemory,
+    }),
   });
   if (!r.ok) throw new Error(await parseError(r));
   return r.json();
+}
+
+export type ChatStreamHandlers = {
+  onMeta: (rag_hits: RagHit[]) => void;
+  onDelta: (content: string) => void;
+  onDone: () => void;
+  onError: (message: string) => void;
+};
+
+/** SSE：首帧 meta，随后 delta，结束 done；错误帧 error。 */
+export async function chatStream(
+  messages: ChatMessage[],
+  useRag: boolean,
+  chatMode: "default" | "interview",
+  pinnedContext: string | null,
+  handlers: ChatStreamHandlers,
+  persistToMemory = true,
+): Promise<void> {
+  const r = await fetch("/api/chat/stream", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      messages,
+      use_rag: useRag,
+      chat_mode: chatMode,
+      pinned_context: pinnedContext || null,
+      persist_to_memory: persistToMemory,
+    }),
+  });
+  if (!r.ok) {
+    handlers.onError(await parseError(r));
+    return;
+  }
+  const reader = r.body?.getReader();
+  if (!reader) {
+    handlers.onError("无法读取响应流");
+    return;
+  }
+  const decoder = new TextDecoder();
+  let buffer = "";
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      buffer += decoder.decode(value ?? new Uint8Array(), { stream: !done });
+      let sep: number;
+      while ((sep = buffer.indexOf("\n\n")) !== -1) {
+        const rawEvent = buffer.slice(0, sep);
+        buffer = buffer.slice(sep + 2);
+        for (const line of rawEvent.split("\n")) {
+          const t = line.trim();
+          if (!t.startsWith("data:")) continue;
+          const payload = t.startsWith("data: ") ? t.slice(6) : t.slice(5).trim();
+          if (!payload || payload === "[DONE]") continue;
+          let obj: { type?: string; content?: string; message?: string; rag_hits?: RagHit[] };
+          try {
+            obj = JSON.parse(payload) as typeof obj;
+          } catch {
+            continue;
+          }
+          if (obj.type === "meta" && Array.isArray(obj.rag_hits)) {
+            handlers.onMeta(obj.rag_hits);
+          } else if (obj.type === "delta" && typeof obj.content === "string") {
+            handlers.onDelta(obj.content);
+          } else if (obj.type === "done") {
+            handlers.onDone();
+            return;
+          } else if (obj.type === "error") {
+            handlers.onError(String(obj.message ?? "流式错误"));
+            return;
+          }
+        }
+      }
+      if (done) break;
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  handlers.onDone();
 }
 
 export async function summarizeProfile(useLlm: boolean): Promise<{ profile: Profile }> {

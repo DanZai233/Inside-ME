@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from inside_me.api.routes import router
 from inside_me.config import get_settings
@@ -31,6 +32,15 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
     application.include_router(router)
+    static = s.static_dir
+    if static is not None:
+        resolved = static.resolve()
+        if resolved.is_dir():
+            application.mount(
+                "/",
+                StaticFiles(directory=str(resolved), html=True),
+                name="static",
+            )
     return application
 
 

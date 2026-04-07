@@ -1,0 +1,17 @@
+services:
+  inside-me:
+    build: .
+    image: inside-me:local
+    ports:
+      - "8080:8000"
+    volumes:
+      - inside_me_data:/data
+    environment:
+      INSIDE_ME_DATA_DIR: /data
+      INSIDE_ME_STATIC_DIR: /app/static
+      # 浏览器访问的页面来源（与 ports 映射一致时可不改）
+      INSIDE_ME_CORS_ORIGINS: "http://localhost:8080,http://127.0.0.1:8080"
+    restart: unless-stopped
+
+volumes:
+  inside_me_data:

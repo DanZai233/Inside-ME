@@ -1,12 +1,57 @@
 from __future__ import annotations
 
 import json
+from collections.abc import AsyncIterator
 from typing import Any
 
 import httpx
 
 from inside_me.analysis.profile import ProfileState
 from inside_me.openai_compat import httpx_client_kwargs, openai_compatible_chat_completions_url
+
+
+async def openai_compatible_chat_stream(
+    *,
+    base_url: str,
+    api_key: str,
+    model: str,
+    messages: list[dict[str, str]],
+    temperature: float = 0.6,
+) -> AsyncIterator[str]:
+    """OpenAI / 火山方舟兼容的 SSE 流式补全，逐段产出文本 delta。"""
+    url = openai_compatible_chat_completions_url(base_url)
+    payload: dict[str, Any] = {
+        "model": model,
+        "messages": messages,
+        "temperature": temperature,
+        "stream": True,
+    }
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    async with httpx.AsyncClient(**httpx_client_kwargs(120.0)) as client:
+        async with client.stream("POST", url, headers=headers, json=payload) as r:
+            r.raise_for_status()
+            async for line in r.aiter_lines():
+                if not line:
+                    continue
+                if line.startswith("data: "):
+                    raw = line[6:].strip()
+                elif line.startswith("data:"):
+                    raw = line[5:].strip()
+                else:
+                    continue
+                if raw == "[DONE]":
+                    break
+                try:
+                    data = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                choices = data.get("choices") or []
+                if not choices:
+                    continue
+                delta = (choices[0] or {}).get("delta") or {}
+                piece = delta.get("content")
+                if piece:
+                    yield str(piece)
 
 
 async def openai_compatible_chat(

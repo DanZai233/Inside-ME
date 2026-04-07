@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import json
+import logging
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from inside_me.analysis.llm import summarize_for_skill
+from inside_me.analysis.llm import openai_compatible_chat_stream, summarize_for_skill
 from inside_me.analysis.social import compute_social_stats
 from inside_me.analysis.profile import (
     ProfileState,
@@ -16,7 +19,14 @@ from inside_me.analysis.profile import (
     merge_profile_json,
     save_profile,
 )
-from inside_me.api.schemas import ChatRequest, ProfilePatch, SkillExportRequest, SummarizeRequest, UserSettings
+from inside_me.api.schemas import (
+    ChatRequest,
+    ProfilePatch,
+    RagPreviewRequest,
+    SkillExportRequest,
+    SummarizeRequest,
+    UserSettings,
+)
 from inside_me.config import Settings, get_settings
 from inside_me.parsers import parse_chat_file
 from inside_me.prefs import (
@@ -28,7 +38,101 @@ from inside_me.prefs import (
 from inside_me.skill.generator import export_skill_dir, validate_skill_name
 from inside_me.store import MessageStore
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/api")
+
+
+def _serialize_rag_hits(hits: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for h in hits:
+        doc = h.get("document") or ""
+        meta = h.get("metadata") or {}
+        if not isinstance(meta, dict):
+            meta = {}
+        short = doc.replace("\n", " ").strip()
+        if len(short) > 180:
+            short = short[:180] + "…"
+        out.append(
+            {
+                "id": str(h.get("id") or ""),
+                "text": doc,
+                "preview": short,
+                "sender": str(meta.get("sender") or ""),
+                "platform": str(meta.get("platform") or ""),
+                "ts": str(meta.get("ts") or ""),
+                "distance": h.get("distance"),
+            }
+        )
+    return out
+
+
+def _persist_chat_turn_to_store(
+    store: MessageStore,
+    settings: Settings,
+    user_text: str,
+    assistant_text: str,
+) -> None:
+    """把一轮对话写入向量库，元数据与文件导入一致，便于后续检索与画像统计。"""
+    u = user_text.strip()
+    a = assistant_text.strip()
+    if not u or not a:
+        return
+    now = datetime.now(timezone.utc).isoformat()
+    platform = "inside-me"
+    texts = [u, a]
+    metas: list[dict[str, Any]] = [
+        {"sender": "我", "platform": platform, "ts": now},
+        {"sender": "数字分身", "platform": platform, "ts": now},
+    ]
+    store.add_messages(texts, metas, source="inside-me")
+    prev = load_profile(settings.profile_path)
+    fresh = build_profile_from_store(store, previous=prev)
+    merged = merge_profile_json(prev, fresh) if prev else fresh
+    merged.updated_at = datetime.now(timezone.utc).isoformat()
+    save_profile(settings.profile_path, merged)
+
+
+def _build_chat_api_messages(
+    body: ChatRequest,
+    store: MessageStore,
+    settings: Settings,
+) -> tuple[list[dict[str, str]], list[dict[str, Any]]]:
+    prof = load_profile(settings.profile_path) or build_profile_from_store(store)
+    last_user = next((m.content for m in reversed(body.messages) if m.role == "user"), "")
+    hits: list[dict[str, Any]] = []
+    if body.use_rag and last_user:
+        hits = store.query(last_user, n=8)
+    rag_hits = _serialize_rag_hits(hits)
+    context_blocks = [h["document"] for h in hits if h.get("document")]
+    rag = "\n\n---\n\n".join(context_blocks[:8])
+    pin = (body.pinned_context or "").strip()
+    if pin and len(pin) > 12000:
+        pin = pin[:12000]
+
+    system = (
+        "你是用户的「数字分身」对话助手：语气自然、贴近其真实自我表达，保持价值一致性与同理心。\n"
+        "【如何使用记忆】下列「相关聊天摘录」来自本地向量检索，是背景材料。请内化后回应，不要逐条复述或像写文献综述；"
+        "除非用户明确追问「某段记录里你怎么说」，否则不必交代「根据第几条记忆」。\n"
+        "若钉选记忆与摘录有冲突，以更贴近用户当下问题的一侧为准，并可温和说明你在综合不同时间的自己。\n\n"
+        f"【画像摘要】{prof.persona_summary or '（待补充）'}\n"
+        f"【价值观笔记】{prof.values_notes or '（待补充）'}\n"
+    )
+    if pin:
+        system += f"\n【用户钉选的一条记忆（优先关注）】\n{pin}\n"
+    if rag:
+        system += f"\n【相关聊天摘录（RAG）】\n{rag}\n"
+
+    if body.chat_mode == "interview":
+        system += (
+            "\n【对话模式：深度访谈】以心理访谈式的节奏回应：先简短反映对方感受或要点，再用一两句澄清式提问，"
+            "帮助对方把价值观、恐惧、渴望说得更具体；每次最多两个问句；不做诊断、不替代专业心理咨询。\n"
+        )
+
+    msgs: list[dict[str, str]] = [{"role": "system", "content": system}]
+    for m in body.messages:
+        msgs.append({"role": m.role, "content": m.content})
+    return msgs, rag_hits
 
 
 def _store_dep(s: Annotated[Settings, Depends(get_settings)]) -> MessageStore:
@@ -197,48 +301,94 @@ async def summarize_profile(
     return SummarizeResult(profile=prof, llm=llm_out)
 
 
+@router.post("/chat/rag-preview")
+def chat_rag_preview(
+    body: RagPreviewRequest,
+    store: Annotated[MessageStore, Depends(_store_dep)],
+) -> dict[str, list[dict[str, Any]]]:
+    q = (body.query or "").strip()
+    if len(q) < 2:
+        return {"rag_hits": []}
+    hits = store.query(q, n=body.n)
+    return {"rag_hits": _serialize_rag_hits(hits)}
+
+
+@router.post("/chat/stream")
+async def chat_stream(
+    body: ChatRequest,
+    store: Annotated[MessageStore, Depends(_store_dep)],
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> StreamingResponse:
+    u = load_user_settings(settings.settings_path)
+    if not u.api_key or u.api_key.startswith("****"):
+        raise HTTPException(400, "请配置 API Key")
+
+    msgs, rag_hits = _build_chat_api_messages(body, store, settings)
+    hits_out = rag_hits if body.use_rag else []
+
+    async def event_gen() -> Any:
+        meta = {"type": "meta", "rag_hits": hits_out}
+        yield f"data: {json.dumps(meta, ensure_ascii=False)}\n\n"
+        assistant_buf: list[str] = []
+        try:
+            async for chunk in openai_compatible_chat_stream(
+                base_url=u.api_base_url,
+                api_key=u.api_key,
+                model=u.model,
+                messages=msgs,
+            ):
+                if chunk:
+                    assistant_buf.append(chunk)
+                    yield f"data: {json.dumps({'type': 'delta', 'content': chunk}, ensure_ascii=False)}\n\n"
+        except Exception as e:
+            yield f"data: {json.dumps({'type': 'error', 'message': str(e)}, ensure_ascii=False)}\n\n"
+            return
+        full_reply = "".join(assistant_buf)
+        if body.persist_to_memory and body.messages and body.messages[-1].role == "user" and full_reply.strip():
+            try:
+                _persist_chat_turn_to_store(store, settings, body.messages[-1].content, full_reply)
+            except Exception:
+                logger.exception("写入对话到本地记忆库失败")
+        yield f"data: {json.dumps({'type': 'done'}, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(
+        event_gen(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
 @router.post("/chat")
 async def chat(
     body: ChatRequest,
     store: Annotated[MessageStore, Depends(_store_dep)],
     settings: Annotated[Settings, Depends(get_settings)],
-) -> dict[str, str]:
+) -> dict[str, Any]:
     u = load_user_settings(settings.settings_path)
     if not u.api_key or u.api_key.startswith("****"):
         raise HTTPException(400, "请配置 API Key")
-    prof = load_profile(settings.profile_path) or build_profile_from_store(store)
-    last_user = next((m.content for m in reversed(body.messages) if m.role == "user"), "")
-    context_blocks: list[str] = []
-    if body.use_rag and last_user:
-        hits = store.query(last_user, n=6)
-        for h in hits:
-            context_blocks.append(h["document"])
-
-    rag = "\n\n".join(context_blocks[:6])
-    system = (
-        "你是用户的「数字分身」对话助手：语气贴近其真实自我表达，保持价值一致性与同理心。"
-        "若引用聊天记录，请概括意涵而非逐字复述。\n\n"
-        f"【画像摘要】{prof.persona_summary or '（待补充）'}\n"
-        f"【价值观笔记】{prof.values_notes or '（待补充）'}\n"
-    )
-    if rag:
-        system += f"\n【相关聊天摘录（RAG）】\n{rag}\n"
-
-    if body.chat_mode == "interview":
-        system += (
-            "\n【对话模式：深度访谈】以心理访谈式的节奏回应：先简短反映对方感受或要点，再用一两句澄清式提问，"
-            "帮助对方把价值观、恐惧、渴望说得更具体；每次最多两个问句；不做诊断、不替代专业心理咨询。\n"
-        )
 
     from inside_me.analysis.llm import openai_compatible_chat
 
-    msgs = [{"role": "system", "content": system}]
-    for m in body.messages:
-        msgs.append({"role": m.role, "content": m.content})
+    msgs, rag_hits = _build_chat_api_messages(body, store, settings)
     reply = await openai_compatible_chat(
         base_url=u.api_base_url, api_key=u.api_key, model=u.model, messages=msgs
     )
-    return {"reply": reply}
+    if (
+        body.persist_to_memory
+        and body.messages
+        and body.messages[-1].role == "user"
+        and reply.strip()
+    ):
+        try:
+            _persist_chat_turn_to_store(store, settings, body.messages[-1].content, reply)
+        except Exception:
+            logger.exception("写入对话到本地记忆库失败")
+    return {"reply": reply, "rag_hits": rag_hits if body.use_rag else []}
 
 
 @router.post("/skill/export")

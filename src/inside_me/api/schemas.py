@@ -25,6 +25,16 @@ class ChatRequest(BaseModel):
     messages: list[ChatMessageIn]
     use_rag: bool = True
     chat_mode: Literal["default", "interview"] = "default"
+    # 用户从记忆档案钉选的一条全文，会优先写入系统提示（仍可与向量检索结果合并）
+    pinned_context: str | None = Field(default=None, max_length=32000)
+    # 将本轮用户句与助手完整回复写入本地向量库，与导入聊天记录同源，供后续 RAG
+    persist_to_memory: bool = True
+
+
+class RagPreviewRequest(BaseModel):
+    """仅向量检索，不调用大模型；用于对话页实时预览相关记忆。"""
+    query: str = Field(default="", max_length=4000)
+    n: int = Field(default=8, ge=1, le=20)
 
 
 class SkillExportRequest(BaseModel):

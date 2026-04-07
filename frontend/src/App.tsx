@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Bar,
   BarChart,
@@ -11,9 +11,11 @@ import "./App.css";
 import {
   type ChatMessage,
   type DashboardResponse,
+  type RagHit,
   type UserSettings,
-  chat,
+  chatStream,
   exportSkill,
+  fetchRagPreview,
   getDashboard,
   getSettings,
   importFile,
@@ -21,6 +23,15 @@ import {
   saveSettings,
   summarizeProfile,
 } from "./api";
+import { MemoryVault } from "./MemoryVault";
+
+/** 新建对话时预置在输入框的开场说明，可直接发送或改写成你自己的话。 */
+const DEFAULT_CHAT_OPENER = `你好。我想和「过往与当下的自己」认真说说话。
+
+请以坦诚、不评判的态度回应；若与本地检索到的记忆相关，请自然融入你的理解，不必逐条点名出处。
+
+今天我最想先聊的是：
+`;
 
 type Tab = "dashboard" | "import" | "chat" | "settings" | "skill";
 
@@ -37,9 +48,16 @@ export default function App() {
     embedding_ark_multimodal: false,
   });
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
-  const [input, setInput] = useState("");
+  const [input, setInput] = useState(DEFAULT_CHAT_OPENER);
   const [rag, setRag] = useState(true);
   const [chatMode, setChatMode] = useState<"default" | "interview">("default");
+  const [persistChatToMemory, setPersistChatToMemory] = useState(true);
+  const [previewHits, setPreviewHits] = useState<RagHit[]>([]);
+  const [injectedHits, setInjectedHits] = useState<RagHit[]>([]);
+  const [streamCharCount, setStreamCharCount] = useState(0);
+  const [vaultStreaming, setVaultStreaming] = useState(false);
+  const [pinnedMemory, setPinnedMemory] = useState<RagHit | null>(null);
+  const ragPreviewSeq = useRef(0);
   const [busy, setBusy] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
   const [skillName, setSkillName] = useState("my-inside-me");
@@ -80,6 +98,33 @@ export default function App() {
       }
     })();
   }, []);
+
+  useEffect(() => {
+    if (tab !== "chat" || !rag) {
+      setPreviewHits([]);
+      return;
+    }
+    const q = input.trim();
+    if (q.length < 2) {
+      setPreviewHits([]);
+      return;
+    }
+    const seq = ++ragPreviewSeq.current;
+    const t = window.setTimeout(() => {
+      void (async () => {
+        try {
+          const { rag_hits } = await fetchRagPreview(q, 8);
+          if (seq === ragPreviewSeq.current) setPreviewHits(rag_hits);
+        } catch {
+          if (seq === ragPreviewSeq.current) setPreviewHits([]);
+        }
+      })();
+    }, 400);
+    return () => {
+      window.clearTimeout(t);
+      ragPreviewSeq.current += 1;
+    };
+  }, [input, rag, tab]);
 
   const platformData = useMemo(() => {
     const p = dash?.profile.platforms ?? {};
@@ -134,18 +179,73 @@ export default function App() {
     const next: ChatMessage[] = [...chatMessages, { role: "user", content: t }];
     setChatMessages(next);
     setInput("");
+    setStreamCharCount(0);
+    setVaultStreaming(true);
+    setInjectedHits([]);
+    const assistantIndex = next.length;
+    setChatMessages([...next, { role: "assistant", content: "" }]);
     try {
-      const { reply } = await chat(next, rag, chatMode);
-      setChatMessages([...next, { role: "assistant", content: reply }]);
+      await chatStream(next, rag, chatMode, pinnedMemory?.text ?? null, {
+        onMeta: (rag_hits) => {
+          setInjectedHits(rag ? rag_hits : []);
+          setPreviewHits([]);
+          setStreamCharCount(0);
+        },
+        onDelta: (chunk) => {
+          setStreamCharCount((c) => c + chunk.length);
+          setChatMessages((prev) => {
+            const copy = [...prev];
+            const cur = copy[assistantIndex];
+            if (cur && cur.role === "assistant") {
+              copy[assistantIndex] = { ...cur, content: cur.content + chunk };
+            }
+            return copy;
+          });
+        },
+        onDone: () => {
+          setVaultStreaming(false);
+        },
+        onError: (msg) => {
+          setVaultStreaming(false);
+          setErr(msg);
+          setChatMessages((prev) => {
+            const copy = [...prev];
+            const cur = copy[assistantIndex];
+            if (cur?.role === "assistant" && !cur.content.trim()) {
+              copy.splice(assistantIndex, 1);
+            }
+            return copy;
+          });
+        },
+      },
+      persistChatToMemory);
     } catch (e) {
+      setVaultStreaming(false);
       setErr(e instanceof Error ? e.message : String(e));
+      setChatMessages((prev) => {
+        const copy = [...prev];
+        const cur = copy[assistantIndex];
+        if (cur?.role === "assistant" && !cur.content.trim()) {
+          copy.splice(assistantIndex, 1);
+        }
+        return copy;
+      });
     } finally {
       setBusy(false);
     }
   };
 
+  const handlePinMemory = (hit: RagHit) => {
+    setPinnedMemory((p) => (p?.id === hit.id ? null : hit));
+  };
+
+  const handleInsertToInput = (hit: RagHit) => {
+    const block = `【参考记忆】\n${hit.text}`;
+    setInput((prev) => (prev.trim() ? `${prev.trim()}\n\n${block}` : block));
+  };
+
   return (
-    <div className="layout">
+    <div className={`layout${tab === "chat" ? " layout--wide" : ""}`}>
       <header className="hero">
         <h1>中之我</h1>
         <p>
@@ -354,41 +454,86 @@ export default function App() {
       )}
 
       {tab === "chat" && (
-        <div className="panel">
-          <h2>深度对话（RAG + 画像）</h2>
-          <label style={{ display: "flex", gap: "0.5rem", alignItems: "center", marginBottom: "0.75rem" }}>
-            <input type="checkbox" checked={rag} onChange={(e) => setRag(e.target.checked)} />
-            <span style={{ color: "var(--muted)", fontSize: "0.9rem" }}>启用本地向量检索（RAG）</span>
-          </label>
-          <label style={{ display: "flex", gap: "0.5rem", alignItems: "center", marginBottom: "0.75rem" }}>
-            <input
-              type="checkbox"
-              checked={chatMode === "interview"}
-              onChange={(e) => setChatMode(e.target.checked ? "interview" : "default")}
+        <div className="chat-workbench">
+          <MemoryVault
+            previewHits={previewHits}
+            injectedHits={injectedHits}
+            pinnedHit={pinnedMemory}
+            onPin={handlePinMemory}
+            onClearPin={() => setPinnedMemory(null)}
+            onInsertToInput={handleInsertToInput}
+            ragEnabled={rag}
+            vaultStreaming={vaultStreaming}
+            streamCharCount={streamCharCount}
+          />
+          <div className="chat-main panel chat-main-panel">
+            <h2>深度对话</h2>
+            <p className="chat-lead">
+              左侧为<strong>记忆档案</strong>：随输入实时预览检索；发送后模型流式回复时抽屉会<strong>逐条点亮</strong>。默认已预置一段开场白，你可直接改发。勾选「写入本地记忆」时，每轮你与助手的完整句子会进入向量库，与导入的聊天记录一起参与后续 RAG。
+            </p>
+            <label className="chat-opt">
+              <input type="checkbox" checked={rag} onChange={(e) => setRag(e.target.checked)} />
+              <span>启用本地向量检索（RAG）</span>
+            </label>
+            <label className="chat-opt">
+              <input
+                type="checkbox"
+                checked={persistChatToMemory}
+                onChange={(e) => setPersistChatToMemory(e.target.checked)}
+              />
+              <span>将每轮对话写入本地记忆库（向量化，供以后检索）</span>
+            </label>
+            <label className="chat-opt">
+              <input
+                type="checkbox"
+                checked={chatMode === "interview"}
+                onChange={(e) => setChatMode(e.target.checked ? "interview" : "default")}
+              />
+              <span>深度访谈模式（澄清式提问；非专业心理咨询）</span>
+            </label>
+            <div className="chat-log chat-log--framed">
+              {chatMessages.length === 0 && (
+                <div className="chat-log-placeholder">在「模型设置」中配置 API Key 后开始对话。</div>
+              )}
+              {chatMessages.map((m, i) => (
+                <div key={i} className={`bubble ${m.role === "user" ? "user" : "assistant"}`}>
+                  <div className="role">{m.role}</div>
+                  {m.content}
+                </div>
+              ))}
+            </div>
+            <textarea
+              className="chat-input"
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              placeholder="可编辑预置开场白，或自写问题；输入时左侧会预览相关记忆…"
             />
-            <span style={{ color: "var(--muted)", fontSize: "0.9rem" }}>
-              深度访谈模式（澄清式提问；非专业心理咨询）
-            </span>
-          </label>
-          <div className="chat-log">
-            {chatMessages.length === 0 && (
-              <div style={{ color: "var(--muted)", fontSize: "0.9rem" }}>在设置中配置 API Key 后开始。</div>
-            )}
-            {chatMessages.map((m, i) => (
-              <div key={i} className={`bubble ${m.role === "user" ? "user" : "assistant"}`}>
-                <div className="role">{m.role}</div>
-                {m.content}
-              </div>
-            ))}
-          </div>
-          <textarea value={input} onChange={(e) => setInput(e.target.value)} placeholder="想说点什么…" />
-          <div className="row" style={{ marginTop: "0.5rem" }}>
-            <button type="button" className="primary" disabled={busy} onClick={() => void sendChat()}>
-              发送
-            </button>
-            <button type="button" className="ghost" onClick={() => setChatMessages([])}>
-              清空
-            </button>
+            <div className="row chat-actions">
+              <button type="button" className="primary" disabled={busy} onClick={() => void sendChat()}>
+                发送
+              </button>
+              <button
+                type="button"
+                className="ghost"
+                onClick={() => setInput(DEFAULT_CHAT_OPENER)}
+                title="用默认开场白替换当前输入"
+              >
+                填入开场白
+              </button>
+              <button
+                type="button"
+                className="ghost"
+                onClick={() => {
+                  setChatMessages([]);
+                  setInjectedHits([]);
+                  setPreviewHits([]);
+                  setPinnedMemory(null);
+                  setInput(DEFAULT_CHAT_OPENER);
+                }}
+              >
+                清空对话
+              </button>
+            </div>
           </div>
         </div>
       )}

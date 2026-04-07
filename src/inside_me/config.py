@@ -1,5 +1,7 @@
 from pathlib import Path
+from typing import Any
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -12,6 +14,15 @@ class Settings(BaseSettings):
     profile_file: str = "profile.json"
 
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
+    # 若存在且为目录，则在根路径托管前端静态资源（如 Vite build 的 dist）；与 /api 同端口即同源
+    static_dir: Path | None = None
+
+    @field_validator("static_dir", mode="before")
+    @classmethod
+    def _empty_static_dir(cls, v: Any) -> Path | None:
+        if v is None or v == "":
+            return None
+        return Path(v) if not isinstance(v, Path) else v
 
     @property
     def chroma_path(self) -> Path:
