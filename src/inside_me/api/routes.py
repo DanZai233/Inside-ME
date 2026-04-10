@@ -1,20 +1,21 @@
 from __future__ import annotations
 
+import csv
 import io
 import json
 import logging
 import shutil
 import zipfile
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import PlainTextResponse, StreamingResponse
 from pydantic import BaseModel
 
+from inside_me import metrics as http_metrics
 from inside_me.analysis.llm import openai_compatible_chat_stream, summarize_for_skill
-from inside_me.analysis.social import compute_social_stats
 from inside_me.analysis.profile import (
     ProfileState,
     build_profile_from_store,
@@ -22,7 +23,14 @@ from inside_me.analysis.profile import (
     merge_profile_json,
     save_profile,
 )
+from inside_me.analysis.filters import distinct_threads, filter_message_rows
+from inside_me.analysis.profile import build_profile_from_rows
+from inside_me.analysis.social import compute_social_stats
+from inside_me.analysis.timeline import compute_timeline
+from inside_me.analysis.topics import compute_keyword_topics
+from inside_me.api import import_jobs
 from inside_me.api.schemas import (
+    ChatArchiveCreate,
     ChatRequest,
     MemoryDeleteRequest,
     MemoryItemUpdate,
@@ -32,8 +40,13 @@ from inside_me.api.schemas import (
     SummarizeRequest,
     UserSettings,
 )
+from inside_me.chat_archives import (
+    create_archive,
+    delete_archive,
+    get_archive,
+    list_archives,
+)
 from inside_me.config import Settings, get_settings
-from inside_me import metrics as http_metrics
 from inside_me.parsers import parse_chat_file
 from inside_me.prefs import (
     load_user_settings,
@@ -76,6 +89,8 @@ def _serialize_rag_hits(hits: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "sender": str(meta.get("sender") or ""),
                 "platform": str(meta.get("platform") or ""),
                 "ts": str(meta.get("ts") or ""),
+                "thread": str(meta.get("thread") or ""),
+                "tags": str(meta.get("tags") or ""),
                 "distance": h.get("distance"),
             }
         )
@@ -93,18 +108,18 @@ def _persist_chat_turn_to_store(
     a = assistant_text.strip()
     if not u or not a:
         return
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     platform = "inside-me"
     texts = [u, a]
     metas: list[dict[str, Any]] = [
-        {"sender": "我", "platform": platform, "ts": now},
-        {"sender": "数字分身", "platform": platform, "ts": now},
+        {"sender": "我", "platform": platform, "ts": now, "thread": "对话"},
+        {"sender": "数字分身", "platform": platform, "ts": now, "thread": "对话"},
     ]
     store.add_messages(texts, metas, source="inside-me", dedupe=True)
     prev = load_profile(settings.profile_path)
     fresh = build_profile_from_store(store, previous=prev)
     merged = merge_profile_json(prev, fresh) if prev else fresh
-    merged.updated_at = datetime.now(timezone.utc).isoformat()
+    merged.updated_at = datetime.now(UTC).isoformat()
     save_profile(settings.profile_path, merged)
 
 
@@ -113,11 +128,21 @@ def _build_chat_api_messages(
     store: MessageStore,
     settings: Settings,
 ) -> tuple[list[dict[str, str]], list[dict[str, Any]]]:
+    u = load_user_settings(settings.settings_path)
     prof = load_profile(settings.profile_path) or build_profile_from_store(store)
     last_user = next((m.content for m in reversed(body.messages) if m.role == "user"), "")
     hits: list[dict[str, Any]] = []
     if body.use_rag and last_user:
-        hits = store.query(last_user, n=8)
+        hits = store.query(
+            last_user,
+            n=8,
+            platform=body.rag_platform,
+            ts_from=body.rag_ts_from,
+            ts_to=body.rag_ts_to,
+            sender_mode=body.rag_sender_mode,
+            self_aliases=u.self_sender_aliases,
+            thread=body.rag_thread,
+        )
     rag_hits = _serialize_rag_hits(hits)
     context_blocks = [h["document"] for h in hits if h.get("document")]
     rag = "\n\n---\n\n".join(context_blocks[:8])
@@ -217,6 +242,9 @@ def post_api_settings(
         use_remote_embedding=body.use_remote_embedding,
         embedding_model=emb,
         embedding_ark_multimodal=body.embedding_ark_multimodal,
+        self_sender_aliases=body.self_sender_aliases,
+        chat_prompt_templates=list(body.chat_prompt_templates),
+        chat_quick_prompts=list(body.chat_quick_prompts),
     )
     if remote_embedding_enabled(merged) and use_ark_multimodal_embeddings(merged):
         base = merged.api_base_url.rstrip("/")
@@ -229,20 +257,76 @@ def post_api_settings(
     return {"status": "saved"}
 
 
+def _archives_file(settings: Settings) -> Path:
+    return settings.data_dir / "chat_archives.json"
+
+
 @router.get("/dashboard")
 def dashboard(
     store: Annotated[MessageStore, Depends(_store_dep)],
     settings: Annotated[Settings, Depends(get_settings)],
-) -> dict:
+    stats_platform: str | None = Query(None, max_length=128),
+    stats_ts_from: str | None = Query(None, max_length=80),
+    stats_ts_to: str | None = Query(None, max_length=80),
+    stats_thread: str | None = Query(None, max_length=500),
+    stats_sender_mode: str = Query(
+        "any",
+        description="any | self_only | exclude_self",
+    ),
+    timeline_granularity: Literal["day", "week"] = Query("day"),
+) -> dict[str, Any]:
+    u = load_user_settings(settings.settings_path)
     prev = load_profile(settings.profile_path)
-    prof = build_profile_from_store(store, previous=prev)
-    save_profile(settings.profile_path, prof)
-    stats_rows = store.list_messages_for_stats(8000)
-    social = compute_social_stats(stats_rows, max_rows=8000)
+    raw_rows = store.list_messages_for_stats(8000)
+    sm = stats_sender_mode if stats_sender_mode in ("any", "self_only", "exclude_self") else "any"
+    filtered = filter_message_rows(
+        raw_rows,
+        platform=stats_platform,
+        ts_from=stats_ts_from,
+        ts_to=stats_ts_to,
+        thread=stats_thread,
+        sender_mode=sm,
+        self_aliases=u.self_sender_aliases,
+    )
+    filters_active = any(
+        [
+            stats_platform and stats_platform.strip(),
+            stats_ts_from and stats_ts_from.strip(),
+            stats_ts_to and stats_ts_to.strip(),
+            stats_thread and stats_thread.strip(),
+            sm != "any",
+        ]
+    )
+    if filters_active:
+        prof = build_profile_from_rows(
+            filtered, previous=prev, total_message_count=store.count()
+        )
+    else:
+        prof = build_profile_from_store(store, previous=prev)
+        save_profile(settings.profile_path, prof)
+    social = compute_social_stats(
+        filtered, max_rows=len(filtered), self_aliases=u.self_sender_aliases
+    )
+    timeline = compute_timeline(filtered, granularity=timeline_granularity)
+    topics = compute_keyword_topics(filtered)
+    thread_options = distinct_threads(raw_rows)
     return {
         "message_count": store.count(),
+        "stats_sample_cap": 8000,
+        "stats_matching": len(filtered),
+        "filters_active": filters_active,
+        "stats_filters": {
+            "platform": stats_platform,
+            "ts_from": stats_ts_from,
+            "ts_to": stats_ts_to,
+            "thread": stats_thread,
+            "sender_mode": sm,
+        },
         "profile": prof.to_public_dict(),
         "social": social,
+        "timeline": timeline,
+        "topics": topics,
+        "thread_options": thread_options,
     }
 
 
@@ -266,7 +350,7 @@ def patch_profile(
         p.values_notes = body.values_notes
     if body.fear_desire_notes is not None:
         p.fear_desire_notes = body.fear_desire_notes
-    p.updated_at = datetime.now(timezone.utc).isoformat()
+    p.updated_at = datetime.now(UTC).isoformat()
     save_profile(settings.profile_path, p)
     return p
 
@@ -282,6 +366,7 @@ async def import_preview(file: UploadFile = File(...)) -> dict[str, Any]:
             "sender": m.sender,
             "ts": m.ts.isoformat() if m.ts else "",
             "platform": m.platform,
+            "thread": m.thread or "",
         }
         for m in messages[:40]
     ]
@@ -313,13 +398,14 @@ async def import_chat(
                 "sender": m.sender or "",
                 "platform": m.platform,
                 "ts": m.ts.isoformat() if m.ts else "",
+                "thread": m.thread or "",
             }
         )
     added, skipped = store.add_messages(texts, metas, source=platform, dedupe=dedupe)
     prev = load_profile(settings.profile_path)
     fresh = build_profile_from_store(store, previous=prev)
     merged = merge_profile_json(prev, fresh) if prev else fresh
-    merged.updated_at = datetime.now(timezone.utc).isoformat()
+    merged.updated_at = datetime.now(UTC).isoformat()
     save_profile(settings.profile_path, merged)
     return {
         "imported": added,
@@ -329,16 +415,55 @@ async def import_chat(
     }
 
 
+@router.post("/import/job")
+async def import_job_start(
+    background_tasks: BackgroundTasks,
+    settings: Annotated[Settings, Depends(get_settings)],
+    file: UploadFile = File(...),
+    dedupe: bool = Query(True, description="跳过与库内内容哈希重复的消息"),
+) -> dict[str, str]:
+    raw = await file.read()
+    jid = import_jobs.create_job(file.filename or "upload.txt")
+    tmp_root = settings.data_dir / "import_jobs"
+    tmp_root.mkdir(parents=True, exist_ok=True)
+    path = tmp_root / f"{jid}.upload"
+    path.write_bytes(raw)
+    background_tasks.add_task(import_jobs.run_import_job, jid, path, dedupe, settings)
+    return {"job_id": jid}
+
+
+@router.get("/import/job/{job_id}")
+def import_job_status(job_id: str) -> dict[str, Any]:
+    st = import_jobs.get_public_state(job_id)
+    if not st:
+        raise HTTPException(404, "未知任务")
+    return st
+
+
+@router.post("/import/job/{job_id}/cancel")
+def import_job_cancel(job_id: str) -> dict[str, bool]:
+    return {"ok": import_jobs.request_cancel(job_id)}
+
+
 @router.get("/memory/browse")
 def memory_browse(
     store: Annotated[MessageStore, Depends(_store_dep)],
+    settings: Annotated[Settings, Depends(get_settings)],
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
     platform: str | None = Query(None),
     q: str | None = Query(None, max_length=500),
     ts_from: str | None = Query(None, max_length=80, description="元数据 ts 下限（ISO 或 YYYY-MM-DD）"),
     ts_to: str | None = Query(None, max_length=80, description="元数据 ts 上限（ISO 或 YYYY-MM-DD，含当日）"),
+    thread: str | None = Query(None, max_length=500),
+    tag: str | None = Query(None, max_length=200),
+    sender_mode: str = Query(
+        "any",
+        description="any | self_only | exclude_self（后两者依赖设置中的本人别名）",
+    ),
 ) -> dict[str, Any]:
+    sm = sender_mode if sender_mode in ("any", "self_only", "exclude_self") else "any"
+    u = load_user_settings(settings.settings_path)
     rows, meta = store.browse_memory(
         limit=limit,
         offset=offset,
@@ -346,6 +471,10 @@ def memory_browse(
         q=q,
         ts_from=ts_from,
         ts_to=ts_to,
+        sender_mode=sm,
+        self_aliases=u.self_sender_aliases,
+        thread=thread,
+        tag=tag,
     )
     return {
         "items": _serialize_rag_hits(rows),
@@ -364,7 +493,7 @@ def memory_delete(
     prev = load_profile(settings.profile_path)
     fresh = build_profile_from_store(store, previous=prev)
     merged = merge_profile_json(prev, fresh) if prev else fresh
-    merged.updated_at = datetime.now(timezone.utc).isoformat()
+    merged.updated_at = datetime.now(UTC).isoformat()
     save_profile(settings.profile_path, merged)
     return {"deleted": n}
 
@@ -381,14 +510,137 @@ def memory_item_patch(
         sender=body.sender,
         platform=body.platform,
         ts=body.ts,
+        thread=body.thread,
+        tags=body.tags,
     )
     if not ok:
         raise HTTPException(404, "未找到该条记忆或更新失败")
     prev = load_profile(settings.profile_path)
     fresh = build_profile_from_store(store, previous=prev)
     merged = merge_profile_json(prev, fresh) if prev else fresh
-    merged.updated_at = datetime.now(timezone.utc).isoformat()
+    merged.updated_at = datetime.now(UTC).isoformat()
     save_profile(settings.profile_path, merged)
+    return {"ok": True}
+
+
+@router.get("/analytics/social-export", response_model=None)
+def analytics_social_export(
+    store: Annotated[MessageStore, Depends(_store_dep)],
+    settings: Annotated[Settings, Depends(get_settings)],
+    export_format: Literal["json", "csv"] = Query("json", alias="format"),
+    stats_platform: str | None = Query(None, max_length=128),
+    stats_ts_from: str | None = Query(None, max_length=80),
+    stats_ts_to: str | None = Query(None, max_length=80),
+    stats_thread: str | None = Query(None, max_length=500),
+    stats_sender_mode: str = Query("any"),
+) -> Any:
+    """导出发送者统计与相邻对（与当前仪表盘筛选一致，基于最多 8000 条样本）。"""
+    u = load_user_settings(settings.settings_path)
+    raw_rows = store.list_messages_for_stats(8000)
+    sm = stats_sender_mode if stats_sender_mode in ("any", "self_only", "exclude_self") else "any"
+    filtered = filter_message_rows(
+        raw_rows,
+        platform=stats_platform,
+        ts_from=stats_ts_from,
+        ts_to=stats_ts_to,
+        thread=stats_thread,
+        sender_mode=sm,
+        self_aliases=u.self_sender_aliases,
+    )
+    social = compute_social_stats(
+        filtered, max_rows=len(filtered), self_aliases=u.self_sender_aliases
+    )
+    payload: dict[str, Any] = {
+        "exported_at": datetime.now(UTC).isoformat(),
+        "stats_sample_cap": 8000,
+        "stats_matching": len(filtered),
+        "filters": {
+            "platform": stats_platform,
+            "ts_from": stats_ts_from,
+            "ts_to": stats_ts_to,
+            "thread": stats_thread,
+            "sender_mode": sm,
+        },
+        "top_senders": social.get("top_senders", []),
+        "adjacent_pairs": social.get("adjacent_pairs", []),
+    }
+    if export_format == "json":
+        return payload
+    buf = io.StringIO()
+    buf.write("\ufeff")
+    buf.write("# top_senders\n")
+    w = csv.writer(buf)
+    w.writerow(["name", "count", "is_self"])
+    for row in social.get("top_senders", []):
+        if isinstance(row, dict):
+            w.writerow(
+                [
+                    row.get("name", ""),
+                    row.get("count", ""),
+                    row.get("is_self", ""),
+                ]
+            )
+    buf.write("\n# adjacent_pairs\n")
+    w = csv.writer(buf)
+    w.writerow(["a", "b", "count", "involves_self", "a_is_self", "b_is_self"])
+    for row in social.get("adjacent_pairs", []):
+        if isinstance(row, dict):
+            w.writerow(
+                [
+                    row.get("a", ""),
+                    row.get("b", ""),
+                    row.get("count", ""),
+                    row.get("involves_self", ""),
+                    row.get("a_is_self", ""),
+                    row.get("b_is_self", ""),
+                ]
+            )
+    return PlainTextResponse(
+        content=buf.getvalue(),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": 'attachment; filename="inside-me-social-export.csv"'},
+    )
+
+
+@router.get("/chat/archives")
+def chat_archives_list(settings: Annotated[Settings, Depends(get_settings)]) -> dict[str, Any]:
+    return {"archives": list_archives(_archives_file(settings))}
+
+
+@router.post("/chat/archives")
+def chat_archives_create(
+    body: ChatArchiveCreate,
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> dict[str, Any]:
+    msgs = [{"role": m.role, "content": m.content} for m in body.messages]
+    item = create_archive(
+        _archives_file(settings),
+        name=body.name,
+        messages=msgs,
+        extra_system=body.extra_system,
+    )
+    return {"archive": item}
+
+
+@router.get("/chat/archives/{archive_id}")
+def chat_archives_get(
+    archive_id: str,
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> dict[str, Any]:
+    r = get_archive(_archives_file(settings), archive_id)
+    if not r:
+        raise HTTPException(404, "未找到存档")
+    return {"archive": r}
+
+
+@router.delete("/chat/archives/{archive_id}")
+def chat_archives_delete(
+    archive_id: str,
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> dict[str, bool]:
+    ok = delete_archive(_archives_file(settings), archive_id)
+    if not ok:
+        raise HTTPException(404, "未找到存档")
     return {"ok": True}
 
 
@@ -435,7 +687,7 @@ async def summarize_profile(
         prof.persona_summary = llm_out.get("persona_summary", prof.persona_summary)
         prof.values_notes = llm_out.get("values", prof.values_notes)
         prof.fear_desire_notes = llm_out.get("fears_desires", prof.fear_desire_notes)
-    prof.updated_at = datetime.now(timezone.utc).isoformat()
+    prof.updated_at = datetime.now(UTC).isoformat()
     save_profile(settings.profile_path, prof)
     return SummarizeResult(profile=prof, llm=llm_out)
 
@@ -444,11 +696,22 @@ async def summarize_profile(
 def chat_rag_preview(
     body: RagPreviewRequest,
     store: Annotated[MessageStore, Depends(_store_dep)],
+    settings: Annotated[Settings, Depends(get_settings)],
 ) -> dict[str, list[dict[str, Any]]]:
     q = (body.query or "").strip()
     if len(q) < 2:
         return {"rag_hits": []}
-    hits = store.query(q, n=body.n)
+    u = load_user_settings(settings.settings_path)
+    hits = store.query(
+        q,
+        n=body.n,
+        platform=body.rag_platform,
+        ts_from=body.rag_ts_from,
+        ts_to=body.rag_ts_to,
+        sender_mode=body.rag_sender_mode,
+        self_aliases=u.self_sender_aliases,
+        thread=body.rag_thread,
+    )
     return {"rag_hits": _serialize_rag_hits(hits)}
 
 
@@ -541,9 +804,9 @@ async def skill_export(
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
     prof = load_profile(settings.profile_path) or build_profile_from_store(store)
+    u = load_user_settings(settings.settings_path)
     llm_blocks: dict[str, str] | None = None
     if body.use_llm:
-        u = load_user_settings(settings.settings_path)
         if not u.api_key or u.api_key.startswith("****"):
             raise HTTPException(400, "导出需要 LLM 时请配置有效 API Key，或关闭 use_llm")
         sample = [x["text"] for x in store.peek_sample(120)]
@@ -554,5 +817,7 @@ async def skill_export(
         save_profile(settings.profile_path, prof)
 
     out_base = settings.data_dir / "exports"
-    path = export_skill_dir(out_base, name, prof, llm_blocks)
+    path = export_skill_dir(
+        out_base, name, prof, llm_blocks, self_sender_aliases=u.self_sender_aliases
+    )
     return {"path": str(path.resolve())}

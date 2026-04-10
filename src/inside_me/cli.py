@@ -77,9 +77,12 @@ def skill(
     except ValueError as e:
         typer.echo(str(e), err=True)
         raise typer.Exit(1) from e
-    store = MessageStore(settings, load_user_settings(settings.settings_path))
+    u = load_user_settings(settings.settings_path)
+    store = MessageStore(settings, u)
     prof = load_profile(settings.profile_path) or build_profile_from_store(store)
-    root = export_skill_dir(out, skill_name, prof, llm_blocks=None)
+    root = export_skill_dir(
+        out, skill_name, prof, llm_blocks=None, self_sender_aliases=u.self_sender_aliases
+    )
     typer.echo(str(root.resolve()))
 
 

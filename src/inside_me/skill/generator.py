@@ -23,7 +23,12 @@ def _yaml_frontmatter(meta: dict[str, Any]) -> str:
     return f"---\n{dumped}\n---\n"
 
 
-def build_skill_markdown(skill_name: str, profile: ProfileState, llm_blocks: dict[str, str] | None) -> str:
+def build_skill_markdown(
+    skill_name: str,
+    profile: ProfileState,
+    llm_blocks: dict[str, str] | None,
+    self_sender_aliases: list[str] | None = None,
+) -> str:
     llm_blocks = llm_blocks or {}
     persona = llm_blocks.get("persona_summary") or profile.persona_summary or "（请基于用户数据补充：性格与自我描述）"
     comm = llm_blocks.get("communication_style") or "（请补充：语气、常用表达、节奏）"
@@ -31,6 +36,24 @@ def build_skill_markdown(skill_name: str, profile: ProfileState, llm_blocks: dic
     fd = llm_blocks.get("fears_desires") or profile.fear_desire_notes or "（请补充：担忧与向往）"
 
     terms = ", ".join(f"{k}" for k, _ in profile.top_terms[:15])
+    aliases = [x.strip() for x in (self_sender_aliases or []) if x.strip()]
+    if aliases:
+        shown = aliases[:40]
+        alias_lines = "\n".join(f"- `{a}`" for a in shown)
+        if len(aliases) > 40:
+            alias_lines += f"\n- （另有 {len(aliases) - 40} 条未列出）"
+        self_alias_section = (
+            "## 本人发送者别名\n\n"
+            "以下名单来自 Inside-ME「模型设置」中的**本人在导出里的昵称别名**，用于在原始聊天记录元数据（`sender`）中识别哪些消息是你本人发送的。"
+            "宿主在引用 RAG、检索或平台导出时，可据此做「仅本人 / 排除本人」等过滤。\n\n"
+            f"{alias_lines}\n"
+        )
+    else:
+        self_alias_section = (
+            "## 本人发送者别名\n\n"
+            "导出时未在 Inside-ME「模型设置」中配置本人昵称别名；如需区分本人与他人，可在应用内填写后重新导出，"
+            "或编辑 `references/MEMORY.md` 手写补充。\n"
+        )
     description = (
         f"以用户真实语言风格、价值观与情感模式回应。当用户希望「像我自己一样思考」"
         f"或需要自我一致性建议时使用。关键词：自我画像、{terms[:400]}"
@@ -81,6 +104,7 @@ def build_skill_markdown(skill_name: str, profile: ProfileState, llm_blocks: dic
 - 平台：{profile.platforms}
 - 高频主题词（启发用，非定论）：{terms}
 
+{self_alias_section}
 ## 增量维护
 
 用户持续导入聊天记录或对话后，应重新导出 skill 以更新本文件；
@@ -96,6 +120,7 @@ def export_skill_dir(
     skill_name: str,
     profile: ProfileState,
     llm_blocks: dict[str, str] | None = None,
+    self_sender_aliases: list[str] | None = None,
 ) -> Path:
     name = validate_skill_name(skill_name)
     root = output_dir / name
@@ -105,15 +130,31 @@ def export_skill_dir(
     refs = root / "references"
     refs.mkdir(exist_ok=True)
 
-    md = build_skill_markdown(name, profile, llm_blocks)
+    aliases_clean = [x.strip() for x in (self_sender_aliases or []) if x.strip()]
+    md = build_skill_markdown(
+        name, profile, llm_blocks, self_sender_aliases=aliases_clean or None
+    )
     (root / "SKILL.md").write_text(md, encoding="utf-8")
 
+    if aliases_clean:
+        alias_md = "## 本人别名（Inside-ME 导出）\n\n" + "\n".join(
+            f"- `{a}`" for a in aliases_clean[:60]
+        )
+        if len(aliases_clean) > 60:
+            alias_md += f"\n- （另有 {len(aliases_clean) - 60} 条未列出）"
+        alias_md += "\n"
+    else:
+        alias_md = (
+            "## 本人别名（Inside-ME 导出）\n\n"
+            "（未配置；可在应用「模型设置」填写后重新导出。）\n"
+        )
     memory = (
         "# 记忆与摘录\n\n"
         "> 将由用户在后续版本写入更细的记忆节点；此处保留结构化统计备份。\n\n"
         f"- message_count: {profile.message_count}\n"
         f"- platforms: {profile.platforms}\n"
-        f"- top_terms: {profile.top_terms}\n"
+        f"- top_terms: {profile.top_terms}\n\n"
+        f"{alias_md}"
     )
     (refs / "MEMORY.md").write_text(memory, encoding="utf-8")
     next_steps = (

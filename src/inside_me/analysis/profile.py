@@ -48,6 +48,53 @@ class ProfileState(BaseModel):
         return self.model_dump()
 
 
+def build_profile_from_rows(
+    rows: list[dict[str, Any]],
+    *,
+    previous: ProfileState | None = None,
+    total_message_count: int | None = None,
+) -> ProfileState:
+    """从已筛选的消息行列表构建画像统计（词频、平台分布等）；笔记类字段继承 previous。"""
+    if not rows:
+        base = previous or ProfileState()
+        base.message_count = total_message_count if total_message_count is not None else 0
+        base.updated_at = datetime.now(timezone.utc).isoformat()
+        return base
+
+    platforms: Counter[str] = Counter()
+    lengths: list[int] = []
+    term_counter: Counter[str] = Counter()
+    for row in rows:
+        meta = row.get("metadata") or {}
+        plat = str(meta.get("platform") or "unknown")
+        platforms[plat] += 1
+        t = row.get("text") or ""
+        lengths.append(len(t))
+        term_counter.update(_tokenize(t))
+
+    top = term_counter.most_common(40)
+    avg_len = sum(lengths) / len(lengths) if lengths else 0.0
+    mc = total_message_count if total_message_count is not None else len(rows)
+    state = ProfileState(
+        message_count=mc,
+        platforms=dict(platforms),
+        top_terms=top[:20],
+        avg_message_len=round(avg_len, 2),
+        persona_summary=(previous.persona_summary if previous else ""),
+        values_notes=(previous.values_notes if previous else ""),
+        fear_desire_notes=(previous.fear_desire_notes if previous else ""),
+    )
+    if previous:
+        if not state.persona_summary:
+            state.persona_summary = previous.persona_summary
+        if not state.values_notes:
+            state.values_notes = previous.values_notes
+        if not state.fear_desire_notes:
+            state.fear_desire_notes = previous.fear_desire_notes
+    state.updated_at = datetime.now(timezone.utc).isoformat()
+    return state
+
+
 def build_profile_from_store(store: MessageStore, previous: ProfileState | None = None) -> ProfileState:
     sample = store.peek_sample(limit=5000)
     if not sample:

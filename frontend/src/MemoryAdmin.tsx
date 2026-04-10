@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   type RagHit,
+  type RagSenderMode,
   browseMemory,
   deleteMemoryIds,
   downloadBackup,
@@ -47,15 +48,21 @@ export function MemoryAdmin({
   onChanged,
   onToast,
   onErr,
+  pendingSearch,
+  onConsumedPendingSearch,
 }: {
   onChanged: () => void;
   onToast: (s: string) => void;
   onErr: (s: string) => void;
+  /** 从仪表盘话题簇等跳转：填入关键词并刷新 */
+  pendingSearch?: string | null;
+  onConsumedPendingSearch?: () => void;
 }) {
   const [q, setQ] = useState("");
   const [platform, setPlatform] = useState("");
   const [tsFrom, setTsFrom] = useState("");
   const [tsTo, setTsTo] = useState("");
+  const [senderMode, setSenderMode] = useState<RagSenderMode>("any");
   const [offset, setOffset] = useState(0);
   const limit = 40;
   const [items, setItems] = useState<RagHit[]>([]);
@@ -67,6 +74,10 @@ export function MemoryAdmin({
   const [editSender, setEditSender] = useState("");
   const [editPlatform, setEditPlatform] = useState("");
   const [editTs, setEditTs] = useState("");
+  const [editThread, setEditThread] = useState("");
+  const [editTags, setEditTags] = useState("");
+  const [browseThread, setBrowseThread] = useState("");
+  const [browseTag, setBrowseTag] = useState("");
 
   const load = useCallback(async () => {
     setBusy(true);
@@ -78,6 +89,9 @@ export function MemoryAdmin({
         q: q.trim() || undefined,
         ts_from: tsFrom.trim() || undefined,
         ts_to: tsTo.trim() || undefined,
+        thread: browseThread.trim() || undefined,
+        tag: browseTag.trim() || undefined,
+        sender_mode: senderMode,
       });
       setItems(res.items);
       setBrowseMeta({
@@ -89,7 +103,19 @@ export function MemoryAdmin({
     } finally {
       setBusy(false);
     }
-  }, [q, platform, tsFrom, tsTo, offset, onErr]);
+  }, [q, platform, tsFrom, tsTo, browseThread, browseTag, senderMode, offset, onErr]);
+
+  useEffect(() => {
+    const p = pendingSearch?.trim();
+    if (!p) return;
+    setQ(p);
+    setOffset(0);
+    onConsumedPendingSearch?.();
+  }, [pendingSearch, onConsumedPendingSearch]);
+
+  useEffect(() => {
+    setOffset(0);
+  }, [senderMode, browseThread, browseTag]);
 
   useEffect(() => {
     void load();
@@ -130,6 +156,8 @@ export function MemoryAdmin({
     setEditSender(h.sender || "");
     setEditPlatform(h.platform || "");
     setEditTs(h.ts || "");
+    setEditThread(h.thread || "");
+    setEditTags(h.tags || "");
   };
 
   const closeEdit = () => {
@@ -146,6 +174,8 @@ export function MemoryAdmin({
         sender: editSender,
         platform: editPlatform,
         ts: editTs,
+        thread: editThread,
+        tags: editTags,
       });
       onToast("已保存修改");
       closeEdit();
@@ -159,9 +189,11 @@ export function MemoryAdmin({
   };
 
   const hasNextPage = items.length >= limit;
-  const tsActive = Boolean(tsFrom.trim() || tsTo.trim());
+  const filterActive = Boolean(
+    tsFrom.trim() || tsTo.trim() || senderMode !== "any" || browseThread.trim() || browseTag.trim(),
+  );
   const totalHint =
-    tsActive && typeof browseMeta.total_matching === "number"
+    filterActive && typeof browseMeta.total_matching === "number"
       ? `本条件共约 ${browseMeta.total_matching} 条（当前页 ${items.length} 条）`
       : null;
 
@@ -170,7 +202,7 @@ export function MemoryAdmin({
       <h2>记忆库</h2>
       <p className="memory-admin__lead">
         关键词为正文<strong>不区分大小写</strong>子串；可填<strong>时间范围</strong>（按元数据里的记录时间解析，无时间字段的条目在时间筛选下会隐藏）。命中词在列表中<strong>高亮</strong>。
-        {tsActive ? " 时间筛选时最多扫描库内 5000 条再过滤，见下方提示。" : ""}
+        {filterActive ? " 时间或发送者筛选时最多扫描库内 5000 条再过滤，见下方提示。" : ""}
       </p>
       {browseMeta.scan_capped ? (
         <p className="memory-admin__warn">已达到扫描上限，结果可能不完整；请缩小平台/关键词/时间范围。</p>
@@ -196,6 +228,36 @@ export function MemoryAdmin({
         <label className="field memory-admin__field">
           时间止
           <input value={tsTo} onChange={(e) => setTsTo(e.target.value)} placeholder="如 2024-12-31" />
+        </label>
+        <label className="field memory-admin__field">
+          发送者
+          <select
+            value={senderMode}
+            onChange={(e) => setSenderMode(e.target.value as RagSenderMode)}
+            aria-label="按本人别名筛选"
+          >
+            <option value="any">全部</option>
+            <option value="self_only">仅本人（读设置里别名）</option>
+            <option value="exclude_self">排除本人</option>
+          </select>
+        </label>
+        <label className="field memory-admin__field">
+          会话 thread
+          <input
+            value={browseThread}
+            onChange={(e) => setBrowseThread(e.target.value)}
+            placeholder="与导入 metadata.thread 一致"
+            maxLength={500}
+          />
+        </label>
+        <label className="field memory-admin__field">
+          标签子串
+          <input
+            value={browseTag}
+            onChange={(e) => setBrowseTag(e.target.value)}
+            placeholder="匹配 tags 字段"
+            maxLength={200}
+          />
         </label>
         <button type="button" className="ghost" disabled={busy || offset === 0} onClick={() => setOffset((o) => Math.max(0, o - limit))}>
           上一页
@@ -248,6 +310,14 @@ export function MemoryAdmin({
                       时间
                       <input value={editTs} onChange={(e) => setEditTs(e.target.value)} placeholder="ISO 或任意文本" />
                     </label>
+                    <label className="field memory-admin__editor-inline">
+                      thread
+                      <input value={editThread} onChange={(e) => setEditThread(e.target.value)} maxLength={500} />
+                    </label>
+                    <label className="field memory-admin__editor-inline memory-admin__editor-inline--wide">
+                      标签
+                      <input value={editTags} onChange={(e) => setEditTags(e.target.value)} maxLength={2000} />
+                    </label>
                   </div>
                   <div className="memory-admin__editor-actions">
                     <button type="button" className="primary" disabled={busy} onClick={() => void saveEdit()}>
@@ -264,6 +334,8 @@ export function MemoryAdmin({
                     <span>{h.platform || "—"}</span>
                     {h.sender ? <span>{h.sender}</span> : null}
                     {h.ts ? <span>{h.ts}</span> : null}
+                    {h.thread ? <span className="memory-admin__thread">{h.thread}</span> : null}
+                    {h.tags ? <span className="memory-admin__tags">{h.tags}</span> : null}
                     <button type="button" className="memory-admin__edit-btn" onClick={() => openEdit(h)}>
                       编辑
                     </button>

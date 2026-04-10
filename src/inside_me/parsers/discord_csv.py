@@ -42,6 +42,14 @@ class DiscordCsvParser(ChatParser):
             if not text:
                 continue
             author = col(row, "author", "username", "name", "sender")
+            channel = col(
+                row,
+                "channel",
+                "channel_name",
+                "guild",
+                "server",
+                "category",
+            )
             ts_raw = col(row, "date", "timestamp", "time", "datetime")
             ts: datetime | None = None
             if ts_raw:
@@ -54,6 +62,12 @@ class DiscordCsvParser(ChatParser):
                     except (ValueError, TypeError, OverflowError):
                         ts = None
             out.append(
-                ParsedMessage(text=text, sender=author or None, ts=ts, platform=self.platform)
+                ParsedMessage(
+                    text=text,
+                    sender=author or None,
+                    ts=ts,
+                    platform=self.platform,
+                    thread=channel or None,
+                )
             )
         return out if len(out) >= 1 else []

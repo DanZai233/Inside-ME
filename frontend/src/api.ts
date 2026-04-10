@@ -54,8 +54,30 @@ export async function getApiHealth(): Promise<ApiHealth> {
   return r.json();
 }
 
-export async function getDashboard(): Promise<DashboardResponse> {
-  const r = await fetch("/api/dashboard", { headers: authHeaders() });
+export type DashboardStatsQuery = {
+  stats_platform?: string;
+  stats_ts_from?: string;
+  stats_ts_to?: string;
+  stats_thread?: string;
+  stats_sender_mode?: "any" | "self_only" | "exclude_self";
+  timeline_granularity?: "day" | "week";
+};
+
+export type TimelineBucket = { period: string; count: number };
+export type TopicCluster = { label: string; count: number; sample_id: string };
+
+export async function getDashboard(q?: DashboardStatsQuery): Promise<DashboardResponse> {
+  const sp = new URLSearchParams();
+  if (q?.stats_platform?.trim()) sp.set("stats_platform", q.stats_platform.trim());
+  if (q?.stats_ts_from?.trim()) sp.set("stats_ts_from", q.stats_ts_from.trim());
+  if (q?.stats_ts_to?.trim()) sp.set("stats_ts_to", q.stats_ts_to.trim());
+  if (q?.stats_thread?.trim()) sp.set("stats_thread", q.stats_thread.trim());
+  if (q?.stats_sender_mode && q.stats_sender_mode !== "any") {
+    sp.set("stats_sender_mode", q.stats_sender_mode);
+  }
+  if (q?.timeline_granularity) sp.set("timeline_granularity", q.timeline_granularity);
+  const qs = sp.toString();
+  const r = await fetch(`/api/dashboard${qs ? `?${qs}` : ""}`, { headers: authHeaders() });
   if (!r.ok) throw new Error(await parseError(r));
   return r.json();
 }
@@ -64,6 +86,14 @@ export async function getSettings(): Promise<UserSettings> {
   const r = await fetch("/api/settings", { headers: authHeaders() });
   if (!r.ok) throw new Error(await parseError(r));
   const s = (await r.json()) as Partial<UserSettings>;
+  const templates = Array.isArray(s.chat_prompt_templates)
+    ? (s.chat_prompt_templates as { name?: string; body?: string }[])
+        .map((x) => ({ name: String(x.name ?? "").slice(0, 80), body: String(x.body ?? "").slice(0, 8000) }))
+        .filter((x) => x.name || x.body)
+    : [];
+  const quick = Array.isArray(s.chat_quick_prompts)
+    ? (s.chat_quick_prompts as unknown[]).map((x) => String(x).trim()).filter(Boolean).slice(0, 24)
+    : [];
   return {
     api_base_url: s.api_base_url ?? "https://api.openai.com",
     api_key: s.api_key ?? "",
@@ -71,6 +101,11 @@ export async function getSettings(): Promise<UserSettings> {
     use_remote_embedding: Boolean(s.use_remote_embedding),
     embedding_model: s.embedding_model ?? "",
     embedding_ark_multimodal: Boolean(s.embedding_ark_multimodal),
+    self_sender_aliases: Array.isArray(s.self_sender_aliases)
+      ? (s.self_sender_aliases as unknown[]).map((x) => String(x).trim()).filter(Boolean)
+      : [],
+    chat_prompt_templates: templates,
+    chat_quick_prompts: quick,
   };
 }
 
@@ -99,11 +134,48 @@ export async function importFile(file: File, dedupe = true): Promise<ImportResul
   return r.json();
 }
 
+export type ImportJobState = {
+  status: string;
+  filename: string;
+  parsed_total: number | null;
+  embedded_done: number;
+  embedded_total: number | null;
+  imported: number | null;
+  skipped_duplicates: number | null;
+  platform: string | null;
+  error: string | null;
+};
+
+export async function startImportJob(file: File, dedupe = true): Promise<{ job_id: string }> {
+  const fd = new FormData();
+  fd.append("file", file);
+  const q = dedupe ? "" : "?dedupe=false";
+  const r = await fetch(`/api/import/job${q}`, { method: "POST", body: fd, headers: authHeaders() });
+  if (!r.ok) throw new Error(await parseError(r));
+  return r.json();
+}
+
+export async function getImportJobStatus(jobId: string): Promise<ImportJobState> {
+  const r = await fetch(`/api/import/job/${encodeURIComponent(jobId)}`, { headers: authHeaders() });
+  if (!r.ok) throw new Error(await parseError(r));
+  return r.json();
+}
+
+export async function cancelImportJob(jobId: string): Promise<{ ok: boolean }> {
+  const r = await fetch(`/api/import/job/${encodeURIComponent(jobId)}/cancel`, {
+    method: "POST",
+    headers: authHeaders(),
+  });
+  if (!r.ok) throw new Error(await parseError(r));
+  return r.json();
+}
+
 export type ImportPreviewRow = {
   text: string;
   sender: string | null;
   ts: string;
   platform: string;
+  thread?: string;
 };
 
 export type ImportPreviewResult = {
@@ -127,14 +199,49 @@ export type RagHit = {
   sender: string;
   platform: string;
   ts: string;
+  thread?: string;
+  tags?: string;
   distance: number | null;
 };
 
-export async function fetchRagPreview(query: string, n = 8): Promise<{ rag_hits: RagHit[] }> {
+export type ChatMessage = { role: "user" | "assistant" | "system"; content: string };
+
+export type RagSenderMode = "any" | "self_only" | "exclude_self";
+
+export type RagScope = {
+  rag_platform?: string | null;
+  rag_ts_from?: string | null;
+  rag_ts_to?: string | null;
+  rag_thread?: string | null;
+  rag_sender_mode?: RagSenderMode;
+};
+
+function ragScopeJson(scope: RagScope | undefined): Record<string, unknown> {
+  if (!scope) return {};
+  const o: Record<string, unknown> = {};
+  const p = scope.rag_platform?.trim();
+  const f = scope.rag_ts_from?.trim();
+  const t = scope.rag_ts_to?.trim();
+  if (p) o.rag_platform = p;
+  if (f) o.rag_ts_from = f;
+  if (t) o.rag_ts_to = t;
+  if (scope.rag_sender_mode && scope.rag_sender_mode !== "any") {
+    o.rag_sender_mode = scope.rag_sender_mode;
+  }
+  const th = scope.rag_thread?.trim();
+  if (th) o.rag_thread = th;
+  return o;
+}
+
+export async function fetchRagPreview(
+  query: string,
+  n = 8,
+  scope?: RagScope,
+): Promise<{ rag_hits: RagHit[] }> {
   const r = await fetch("/api/chat/rag-preview", {
     method: "POST",
     headers: authHeaders({ "Content-Type": "application/json" }),
-    body: JSON.stringify({ query, n }),
+    body: JSON.stringify({ query, n, ...ragScopeJson(scope) }),
   });
   if (!r.ok) throw new Error(await parseError(r));
   return r.json();
@@ -147,6 +254,7 @@ export async function chat(
   pinnedContext: string | null = null,
   persistToMemory = true,
   extraSystem: string | null = null,
+  ragScope?: RagScope,
 ): Promise<{ reply: string; rag_hits: RagHit[] }> {
   const r = await fetch("/api/chat", {
     method: "POST",
@@ -158,6 +266,7 @@ export async function chat(
       pinned_context: pinnedContext || null,
       persist_to_memory: persistToMemory,
       extra_system: extraSystem?.trim() || null,
+      ...ragScopeJson(ragScope),
     }),
   });
   if (!r.ok) throw new Error(await parseError(r));
@@ -175,6 +284,7 @@ export type ChatStreamOptions = {
   persistToMemory?: boolean;
   extraSystem?: string | null;
   signal?: AbortSignal;
+  ragScope?: RagScope;
 };
 
 /** SSE：首帧 meta，随后 delta，结束 done；错误帧 error。 */
@@ -186,7 +296,7 @@ export async function chatStream(
   handlers: ChatStreamHandlers,
   options: ChatStreamOptions = {},
 ): Promise<void> {
-  const { persistToMemory = true, extraSystem = null, signal } = options;
+  const { persistToMemory = true, extraSystem = null, signal, ragScope } = options;
   let r: Response;
   try {
     r = await fetch("/api/chat/stream", {
@@ -199,6 +309,7 @@ export async function chatStream(
         pinned_context: pinnedContext || null,
         persist_to_memory: persistToMemory,
         extra_system: extraSystem?.trim() || null,
+        ...ragScopeJson(ragScope),
       }),
       signal,
     });
@@ -327,6 +438,9 @@ export async function browseMemory(params: {
   q?: string;
   ts_from?: string;
   ts_to?: string;
+  thread?: string;
+  tag?: string;
+  sender_mode?: RagSenderMode;
 }): Promise<MemoryBrowseResponse> {
   const sp = new URLSearchParams();
   if (params.limit != null) sp.set("limit", String(params.limit));
@@ -335,6 +449,9 @@ export async function browseMemory(params: {
   if (params.q?.trim()) sp.set("q", params.q.trim());
   if (params.ts_from?.trim()) sp.set("ts_from", params.ts_from.trim());
   if (params.ts_to?.trim()) sp.set("ts_to", params.ts_to.trim());
+  if (params.sender_mode && params.sender_mode !== "any") sp.set("sender_mode", params.sender_mode);
+  if (params.thread?.trim()) sp.set("thread", params.thread.trim());
+  if (params.tag?.trim()) sp.set("tag", params.tag.trim());
   const q = sp.toString();
   const r = await fetch(`/api/memory/browse${q ? `?${q}` : ""}`, { headers: authHeaders() });
   if (!r.ok) throw new Error(await parseError(r));
@@ -364,6 +481,8 @@ export async function patchMemoryItem(body: {
   sender?: string;
   platform?: string;
   ts?: string;
+  thread?: string;
+  tags?: string;
 }): Promise<{ ok: boolean }> {
   const r = await fetch("/api/memory/item", {
     method: "PATCH",
@@ -372,6 +491,88 @@ export async function patchMemoryItem(body: {
   });
   if (!r.ok) throw new Error(await parseError(r));
   return r.json();
+}
+
+function socialExportSearchParams(format: "json" | "csv", q: DashboardStatsQuery): string {
+  const sp = new URLSearchParams();
+  sp.set("format", format);
+  if (q.stats_platform?.trim()) sp.set("stats_platform", q.stats_platform.trim());
+  if (q.stats_ts_from?.trim()) sp.set("stats_ts_from", q.stats_ts_from.trim());
+  if (q.stats_ts_to?.trim()) sp.set("stats_ts_to", q.stats_ts_to.trim());
+  if (q.stats_thread?.trim()) sp.set("stats_thread", q.stats_thread.trim());
+  if (q.stats_sender_mode && q.stats_sender_mode !== "any") {
+    sp.set("stats_sender_mode", q.stats_sender_mode);
+  }
+  return sp.toString();
+}
+
+export async function fetchSocialExportJson(q: DashboardStatsQuery): Promise<unknown> {
+  const r = await fetch(`/api/analytics/social-export?${socialExportSearchParams("json", q)}`, {
+    headers: authHeaders(),
+  });
+  if (!r.ok) throw new Error(await parseError(r));
+  return r.json();
+}
+
+export async function downloadSocialExportCsv(q: DashboardStatsQuery): Promise<void> {
+  const r = await fetch(`/api/analytics/social-export?${socialExportSearchParams("csv", q)}`, {
+    headers: authHeaders(),
+  });
+  if (!r.ok) throw new Error(await parseError(r));
+  const blob = await r.blob();
+  const u = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = u;
+  a.download = "inside-me-social-export.csv";
+  a.click();
+  URL.revokeObjectURL(u);
+}
+
+export type ChatArchiveListItem = {
+  id: string;
+  name: string;
+  created_at: string;
+  updated_at: string;
+  message_count: number;
+};
+
+export type ChatArchiveFull = ChatArchiveListItem & {
+  messages: ChatMessage[];
+  extra_system?: string | null;
+};
+
+export async function listChatArchives(): Promise<{ archives: ChatArchiveListItem[] }> {
+  const r = await fetch("/api/chat/archives", { headers: authHeaders() });
+  if (!r.ok) throw new Error(await parseError(r));
+  return r.json();
+}
+
+export async function createChatArchive(body: {
+  name: string;
+  messages: ChatMessage[];
+  extra_system?: string | null;
+}): Promise<{ archive: ChatArchiveFull }> {
+  const r = await fetch("/api/chat/archives", {
+    method: "POST",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify(body),
+  });
+  if (!r.ok) throw new Error(await parseError(r));
+  return r.json();
+}
+
+export async function getChatArchive(id: string): Promise<{ archive: ChatArchiveFull }> {
+  const r = await fetch(`/api/chat/archives/${encodeURIComponent(id)}`, { headers: authHeaders() });
+  if (!r.ok) throw new Error(await parseError(r));
+  return r.json();
+}
+
+export async function deleteChatArchive(id: string): Promise<void> {
+  const r = await fetch(`/api/chat/archives/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+    headers: authHeaders(),
+  });
+  if (!r.ok) throw new Error(await parseError(r));
 }
 
 /** 通过 fetch（含可选 Bearer）下载 inside-me-backup.zip */
@@ -387,8 +588,6 @@ export async function downloadBackup(): Promise<void> {
   URL.revokeObjectURL(u);
 }
 
-export type ChatMessage = { role: "user" | "assistant" | "system"; content: string };
-
 export type Profile = {
   message_count: number;
   platforms: Record<string, number>;
@@ -402,15 +601,41 @@ export type Profile = {
 
 export type SocialStats = {
   sample_size: number;
-  top_senders: { name: string; count: number }[];
-  adjacent_pairs: { a: string; b: string; count: number }[];
+  top_senders: { name: string; count: number; is_self?: boolean }[];
+  adjacent_pairs: {
+    a: string;
+    b: string;
+    count: number;
+    involves_self?: boolean;
+    a_is_self?: boolean;
+    b_is_self?: boolean;
+  }[];
+  self_aliases_configured?: boolean;
+  tagged_self_count?: number;
+  tagged_other_count?: number;
+  untagged_sender_count?: number;
 };
 
 export type DashboardResponse = {
   message_count: number;
+  stats_sample_cap?: number;
+  stats_matching?: number;
+  filters_active?: boolean;
+  stats_filters?: {
+    platform?: string | null;
+    ts_from?: string | null;
+    ts_to?: string | null;
+    thread?: string | null;
+    sender_mode?: string;
+  };
   profile: Profile;
   social: SocialStats;
+  timeline?: TimelineBucket[];
+  topics?: TopicCluster[];
+  thread_options?: string[];
 };
+
+export type ChatPromptTemplate = { name: string; body: string };
 
 export type UserSettings = {
   api_base_url: string;
@@ -419,4 +644,8 @@ export type UserSettings = {
   use_remote_embedding: boolean;
   embedding_model: string;
   embedding_ark_multimodal: boolean;
+  /** 与导入元数据 sender 比对，用于统计与 RAG/记忆库筛选 */
+  self_sender_aliases: string[];
+  chat_prompt_templates: ChatPromptTemplate[];
+  chat_quick_prompts: string[];
 };

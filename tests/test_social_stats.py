@@ -20,6 +20,8 @@ class TestSocialStats(unittest.TestCase):
         pairs = {(p["a"], p["b"]): p["count"] for p in out["adjacent_pairs"]}
         # 甲→乙 与 乙→甲 合并为同一条无向边（字典序规范化），计数 2
         self.assertEqual(pairs.get(("乙", "甲")), 2)
+        for p in out["adjacent_pairs"]:
+            self.assertNotIn("involves_self", p)
 
     def test_empty(self) -> None:
         out = compute_social_stats([], max_rows=100)

@@ -305,6 +305,140 @@ button.ghost {
   font-variant-numeric: tabular-nums;
 }
 
+.pair-list__hint-self {
+  color: var(--vault-amber);
+  font-weight: 600;
+}
+
+.pair-list li.pair-list__item--self {
+  border-color: color-mix(in srgb, var(--vault-amber) 42%, var(--border));
+  background: color-mix(in srgb, var(--vault-amber) 10%, var(--surface-inset));
+}
+
+.pair-list .pair-list__name--self {
+  color: var(--vault-amber);
+  font-weight: 600;
+}
+
+.dash-filter-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 0.65rem 1rem;
+  margin-top: 0.5rem;
+}
+
+.topic-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  margin-top: 0.5rem;
+}
+
+button.topic-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.25rem 0.55rem;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--surface-inset);
+  color: var(--text);
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+
+.topic-chip__n {
+  font-size: 0.75rem;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.chat-template-row {
+  margin-top: 0.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.chat-template-row__label {
+  font-size: 0.78rem;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.chat-template-row__btns {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.chat-template-chip {
+  font-size: 0.82rem !important;
+  padding: 0.2rem 0.5rem !important;
+}
+
+.chat-archives-fold {
+  margin-top: 0.65rem;
+  padding: 0.5rem 0.65rem;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface-inset);
+}
+
+.chat-archives-fold__row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: flex-end;
+  margin-top: 0.35rem;
+}
+
+.chat-archives-fold__name {
+  flex: 1 1 200px;
+  margin-bottom: 0 !important;
+}
+
+.chat-archives-fold__list {
+  list-style: none;
+  margin: 0.65rem 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.chat-archives-fold__list li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.45rem;
+  font-size: 0.88rem;
+}
+
+.chat-archives-fold__title {
+  flex: 1 1 180px;
+}
+
+.memory-admin__editor-inline--wide {
+  flex: 1 1 100%;
+}
+
+.memory-admin__thread,
+.memory-admin__tags {
+  font-size: 0.78rem;
+  color: var(--accent-dim);
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-templates-json {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.82rem;
+}
+
 /* —— 对话工作台 + 记忆档案 —— */
 .layout.layout--wide {
   max-width: 1360px;
@@ -883,6 +1017,44 @@ button.ghost {
   color: var(--danger) !important;
 }
 
+.import-sender-fold {
+  margin: 0.75rem 0 1rem;
+  padding: 0.5rem 0.65rem;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--panel) 88%, transparent);
+  font-size: 0.82rem;
+}
+
+.import-sender-fold summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-weight: 500;
+}
+
+.import-sender-fold__body {
+  margin-top: 0.5rem;
+  color: var(--muted);
+  line-height: 1.55;
+}
+
+.import-sender-fold__body p {
+  margin: 0.45rem 0;
+}
+
+.import-sender-fold__body ul {
+  margin: 0.35rem 0 0.35rem 1.1rem;
+  padding: 0;
+}
+
+.import-sender-fold__body li {
+  margin: 0.25rem 0;
+}
+
+.import-sender-fold__body code {
+  font-size: 0.88em;
+}
+
 .import-preview {
   margin-top: 1rem;
 }
@@ -931,6 +1103,143 @@ button.ghost {
   margin-top: 0.2rem;
   color: var(--text);
   white-space: pre-wrap;
+}
+
+.import-preview__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.import-job-panel {
+  margin: 0.85rem 0;
+  padding: 0.65rem 0.75rem;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--surface-inset) 70%, var(--panel));
+  font-size: 0.85rem;
+}
+
+.import-job-panel__head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem 0.65rem;
+  align-items: baseline;
+  margin-bottom: 0.45rem;
+}
+
+.import-job-panel__fn {
+  color: var(--muted);
+  word-break: break-all;
+}
+
+.import-job-panel__st {
+  font-variant-numeric: tabular-nums;
+  color: var(--accent-dim);
+  text-transform: uppercase;
+  font-size: 0.72rem;
+  letter-spacing: 0.04em;
+}
+
+.import-job-panel__bar {
+  display: block;
+  width: 100%;
+  height: 6px;
+  margin-bottom: 0.5rem;
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.rag-scope-fold {
+  margin: 0.5rem 0 0.75rem;
+  padding: 0.5rem 0.65rem;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--panel) 88%, transparent);
+  font-size: 0.82rem;
+}
+
+.rag-scope-fold summary {
+  cursor: pointer;
+  color: var(--muted);
+}
+
+.rag-scope-fold__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 0.65rem;
+  margin-top: 0.5rem;
+}
+
+.rag-scope-fold__field {
+  min-width: 0;
+  margin: 0;
+  font-size: 0.78rem;
+}
+
+.rag-scope-fold__hint {
+  margin: 0.5rem 0 0;
+  font-size: 0.75rem;
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.chat-preset-block {
+  margin: 0.75rem 0;
+}
+
+.interview-custom-fold {
+  margin-top: 0.65rem;
+  padding: 0.5rem 0.65rem;
+  border-radius: 10px;
+  border: 1px dashed var(--border);
+  font-size: 0.82rem;
+}
+
+.interview-custom-fold summary {
+  cursor: pointer;
+  color: var(--muted);
+}
+
+.interview-custom-fold__ta {
+  width: 100%;
+  margin-top: 0.45rem;
+  font: inherit;
+  font-size: 0.85rem;
+}
+
+.interview-custom-fold__row {
+  margin-top: 0.45rem;
+}
+
+.interview-custom-fold__list {
+  list-style: none;
+  margin: 0.55rem 0 0;
+  padding: 0;
+}
+
+.interview-custom-fold__list li {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.25rem 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.8rem;
+}
+
+.interview-custom-fold__name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.interview-custom-fold__del {
+  flex-shrink: 0;
+  font-size: 0.72rem;
+  padding: 0.15rem 0.45rem;
 }
 
 .memory-admin__lead {

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import time
 
 import pytest
 from fastapi.testclient import TestClient
@@ -68,3 +69,25 @@ def test_memory_item_patch_not_found(client) -> None:
         json={"id": "missing-id-xxxxxxxx", "sender": "x"},
     )
     assert r.status_code == 404
+
+
+def test_import_job_completes(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("INSIDE_ME_DATA_DIR", str(tmp_path))
+    c = TestClient(create_app())
+    raw = b"[2024-01-01 12:00:00] user: hello job import line\n"
+    r = c.post("/api/import/job", files={"file": ("smoke_job.txt", io.BytesIO(raw), "text/plain")})
+    assert r.status_code == 200
+    jid = r.json().get("job_id")
+    assert jid
+    body: dict = {}
+    status = "queued"
+    for _ in range(100):
+        s = c.get(f"/api/import/job/{jid}")
+        assert s.status_code == 200
+        body = s.json()
+        status = str(body.get("status", ""))
+        if status in ("done", "error", "cancelled"):
+            break
+        time.sleep(0.02)
+    assert status == "done"
+    assert (body.get("imported") or 0) >= 1

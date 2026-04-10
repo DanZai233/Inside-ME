@@ -1,5 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  getCustomScriptById,
+  loadCustomInterviewScripts,
+  newCustomScriptId,
+  parseInterviewScriptImport,
+  saveCustomInterviewScripts,
+  type CustomInterviewScript,
+} from "./customInterviewScripts";
+import {
   INTERVIEW_PRESETS,
   getInterviewPreset,
   mergeInterviewExtra,
@@ -7,6 +15,7 @@ import {
 import {
   Bar,
   BarChart,
+  Cell,
   ResponsiveContainer,
   Tooltip,
   XAxis,
@@ -17,19 +26,32 @@ import {
   type ApiHealth,
   type ChatMessage,
   type DashboardResponse,
+  type DashboardStatsQuery,
+  type ImportJobState,
   type ImportPreviewResult,
   type RagHit,
+  type RagScope,
+  type RagSenderMode,
   type UserSettings,
+  cancelImportJob,
   chatStream,
+  createChatArchive,
+  deleteChatArchive,
+  downloadSocialExportCsv,
   exportSkill,
   fetchMetricsText,
   fetchRagPreview,
+  fetchSocialExportJson,
   getApiHealth,
   getDashboard,
+  getChatArchive,
+  listChatArchives,
+  getImportJobStatus,
   getSettings,
   getUiApiBearer,
   importFile,
   importPreview,
+  startImportJob,
   patchProfile,
   saveSettings,
   setUiApiBearer,
@@ -55,6 +77,9 @@ type ChatSessionV = {
 };
 
 const CHAT_STORE_KEY = "inside-me-chat-v1";
+const LS_RAG_SLICE = "inside-me-rag-slice-v1";
+const LS_RAG_SENDER_MODE = "inside-me-rag-sender-mode";
+const LS_RAG_THREAD = "inside-me-rag-thread-v1";
 
 function readChatStore(): { activeId: string; sessions: ChatSessionV[] } {
   try {
@@ -101,6 +126,30 @@ function saveBookmarks(rows: BookmarkEntry[]) {
 const THEME_KEY = "inside-me-theme";
 const LS_INTERVIEW_PRESET = "inside-me-interview-preset-id";
 
+function readRagSlice(): { p: string; f: string; t: string } {
+  try {
+    const raw = localStorage.getItem(LS_RAG_SLICE);
+    if (!raw) return { p: "", f: "", t: "" };
+    const o = JSON.parse(raw) as { p?: string; f?: string; t?: string };
+    return {
+      p: typeof o.p === "string" ? o.p : "",
+      f: typeof o.f === "string" ? o.f : "",
+      t: typeof o.t === "string" ? o.t : "",
+    };
+  } catch {
+    return { p: "", f: "", t: "" };
+  }
+}
+
+function readRagThread(): string {
+  try {
+    const v = localStorage.getItem(LS_RAG_THREAD);
+    return typeof v === "string" ? v : "";
+  } catch {
+    return "";
+  }
+}
+
 export default function App() {
   const boot = readChatStore();
   const bootActive = boot.sessions.find((s) => s.id === boot.activeId) ?? boot.sessions[0];
@@ -116,6 +165,9 @@ export default function App() {
     use_remote_embedding: false,
     embedding_model: "",
     embedding_ark_multimodal: false,
+    self_sender_aliases: [],
+    chat_prompt_templates: [],
+    chat_quick_prompts: [],
   });
   const [sessions, setSessions] = useState<ChatSessionV[]>(() => boot.sessions);
   const [activeSessionId, setActiveSessionId] = useState(() => boot.activeId);
@@ -164,13 +216,58 @@ export default function App() {
       return "";
     }
   });
+  const [ragPlatform, setRagPlatform] = useState(() => readRagSlice().p);
+  const [ragTsFrom, setRagTsFrom] = useState(() => readRagSlice().f);
+  const [ragTsTo, setRagTsTo] = useState(() => readRagSlice().t);
+  const [ragThread, setRagThread] = useState(() => readRagThread());
+  const [ragSenderMode, setRagSenderMode] = useState<RagSenderMode>(() => {
+    try {
+      const v = localStorage.getItem(LS_RAG_SENDER_MODE);
+      if (v === "self_only" || v === "exclude_self" || v === "any") return v;
+    } catch {
+      /* ignore */
+    }
+    return "any";
+  });
+  const [customScripts, setCustomScripts] = useState<CustomInterviewScript[]>(() => loadCustomInterviewScripts());
+  const [scriptImportDraft, setScriptImportDraft] = useState("");
+  const [importJobId, setImportJobId] = useState<string | null>(null);
+  const [importJobStatus, setImportJobStatus] = useState<ImportJobState | null>(null);
   const [voiceListening, setVoiceListening] = useState(false);
   const speechRecRef = useRef<{ stop: () => void; abort?: () => void } | null>(null);
+
+  const [dashFPlatform, setDashFPlatform] = useState("");
+  const [dashFTsFrom, setDashFTsFrom] = useState("");
+  const [dashFTsTo, setDashFTsTo] = useState("");
+  const [dashFThread, setDashFThread] = useState("");
+  const [dashFSender, setDashFSender] = useState<RagSenderMode>("any");
+  const [dashTimeGran, setDashTimeGran] = useState<"day" | "week">("day");
+  const [pendingMemorySearch, setPendingMemorySearch] = useState<string | null>(null);
+  const [chatArchives, setChatArchives] = useState<
+    { id: string; name: string; created_at: string; message_count: number }[]
+  >([]);
+  const [archiveNameDraft, setArchiveNameDraft] = useState("");
+  const [templatesJsonDraft, setTemplatesJsonDraft] = useState("[]");
+  const [quickPromptsDraft, setQuickPromptsDraft] = useState("");
+
+  const [appliedDashboardQuery, setAppliedDashboardQuery] = useState<DashboardStatsQuery>({
+    timeline_granularity: "day",
+  });
+
+  const buildDashQueryFromForm = useCallback((): DashboardStatsQuery => {
+    const q: DashboardStatsQuery = { timeline_granularity: dashTimeGran };
+    if (dashFPlatform.trim()) q.stats_platform = dashFPlatform.trim();
+    if (dashFTsFrom.trim()) q.stats_ts_from = dashFTsFrom.trim();
+    if (dashFTsTo.trim()) q.stats_ts_to = dashFTsTo.trim();
+    if (dashFThread.trim()) q.stats_thread = dashFThread.trim();
+    if (dashFSender !== "any") q.stats_sender_mode = dashFSender;
+    return q;
+  }, [dashFPlatform, dashFTsFrom, dashFTsTo, dashFThread, dashFSender, dashTimeGran]);
 
   const refresh = useCallback(async () => {
     setErr(null);
     try {
-      const d = await getDashboard();
+      const d = await getDashboard(appliedDashboardQuery);
       setDash(d);
       const p = d.profile;
       setNotes({
@@ -186,17 +283,26 @@ export default function App() {
     } catch {
       setApiHealth(null);
     }
-  }, []);
+  }, [appliedDashboardQuery]);
 
   useEffect(() => {
     void refresh();
   }, [refresh]);
 
   useEffect(() => {
+    setAppliedDashboardQuery((prev) => {
+      if (prev.timeline_granularity === dashTimeGran) return prev;
+      return { ...prev, timeline_granularity: dashTimeGran };
+    });
+  }, [dashTimeGran]);
+
+  useEffect(() => {
     void (async () => {
       try {
         const s = await getSettings();
         setSettings(s);
+        setTemplatesJsonDraft(JSON.stringify(s.chat_prompt_templates ?? [], null, 2));
+        setQuickPromptsDraft((s.chat_quick_prompts ?? []).join("\n"));
       } catch {
         /* ignore */
       }
@@ -219,6 +325,71 @@ export default function App() {
       /* ignore */
     }
   }, [interviewPresetId]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(LS_RAG_SLICE, JSON.stringify({ p: ragPlatform, f: ragTsFrom, t: ragTsTo }));
+    } catch {
+      /* ignore */
+    }
+  }, [ragPlatform, ragTsFrom, ragTsTo]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(LS_RAG_THREAD, ragThread);
+    } catch {
+      /* ignore */
+    }
+  }, [ragThread]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(LS_RAG_SENDER_MODE, ragSenderMode);
+    } catch {
+      /* ignore */
+    }
+  }, [ragSenderMode]);
+
+  useEffect(() => {
+    if (!importJobId) return;
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const st = await getImportJobStatus(importJobId);
+        if (cancelled) return;
+        setImportJobStatus(st);
+        if (st.status === "done" || st.status === "error" || st.status === "cancelled") {
+          if (st.status === "done") {
+            const skip = st.skipped_duplicates ?? 0;
+            setToast(
+              skip
+                ? `后台导入完成：新增 ${st.imported ?? 0} 条、跳过重复 ${skip}（${st.platform ?? "?"}）`
+                : `后台导入完成：共 ${st.imported ?? 0} 条（${st.platform ?? "?"}）`,
+            );
+            setImportPreviewData(null);
+            pendingImportFileRef.current = null;
+            await refresh();
+          } else if (st.status === "error") {
+            setErr(st.error ?? "后台导入失败");
+          } else {
+            setToast("后台导入已取消");
+          }
+          setImportJobId(null);
+        }
+      } catch (e) {
+        if (!cancelled) {
+          setErr(e instanceof Error ? e.message : String(e));
+          setImportJobId(null);
+        }
+      }
+    };
+    const id = window.setInterval(() => void tick(), 500);
+    void tick();
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, [importJobId, refresh]);
 
   useEffect(() => {
     const t = window.setTimeout(() => {
@@ -256,6 +427,17 @@ export default function App() {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
+  const ragScope = useMemo(
+    (): RagScope => ({
+      rag_platform: ragPlatform.trim() || null,
+      rag_ts_from: ragTsFrom.trim() || null,
+      rag_ts_to: ragTsTo.trim() || null,
+      rag_thread: ragThread.trim() || null,
+      rag_sender_mode: ragSenderMode,
+    }),
+    [ragPlatform, ragTsFrom, ragTsTo, ragThread, ragSenderMode],
+  );
+
   useEffect(() => {
     if (tab !== "chat" || !rag) {
       setPreviewHits([]);
@@ -270,7 +452,7 @@ export default function App() {
     const t = window.setTimeout(() => {
       void (async () => {
         try {
-          const { rag_hits } = await fetchRagPreview(q, 8);
+          const { rag_hits } = await fetchRagPreview(q, 8, ragScope);
           if (seq === ragPreviewSeq.current) setPreviewHits(rag_hits);
         } catch {
           if (seq === ragPreviewSeq.current) setPreviewHits([]);
@@ -281,7 +463,7 @@ export default function App() {
       window.clearTimeout(t);
       ragPreviewSeq.current += 1;
     };
-  }, [input, rag, tab]);
+  }, [input, rag, tab, ragScope]);
 
   useEffect(() => {
     if (tab !== "chat") return;
@@ -289,6 +471,13 @@ export default function App() {
     if (!el) return;
     el.scrollTop = el.scrollHeight;
   }, [tab, chatMessages]);
+
+  useEffect(() => {
+    if (tab !== "chat") return;
+    void listChatArchives()
+      .then((r) => setChatArchives(r.archives))
+      .catch(() => {});
+  }, [tab]);
 
   const copyAssistantText = useCallback((text: string) => {
     void navigator.clipboard.writeText(text).then(
@@ -401,16 +590,28 @@ export default function App() {
     return rows.slice(0, 18).map((s) => ({
       name: s.name.length > 12 ? `${s.name.slice(0, 12)}…` : s.name,
       value: s.count,
+      isSelf: Boolean(s.is_self),
     }));
   }, [dash]);
 
+  const presetAppendForChat = useMemo(() => {
+    if (chatMode !== "interview") return "";
+    if (interviewPresetId.startsWith("custom:")) {
+      return getCustomScriptById(customScripts, interviewPresetId)?.systemAppend ?? "";
+    }
+    return getInterviewPreset(interviewPresetId)?.systemAppend ?? "";
+  }, [chatMode, interviewPresetId, customScripts]);
+
   const mergedForChat = useMemo(() => {
-    const presetText =
-      chatMode === "interview"
-        ? (getInterviewPreset(interviewPresetId)?.systemAppend ?? "")
-        : "";
-    return mergeInterviewExtra(presetText, extraSystem);
-  }, [chatMode, interviewPresetId, extraSystem]);
+    return mergeInterviewExtra(presetAppendForChat, extraSystem);
+  }, [presetAppendForChat, extraSystem]);
+
+  const interviewHintText = useMemo(() => {
+    if (interviewPresetId.startsWith("custom:")) {
+      return getCustomScriptById(customScripts, interviewPresetId)?.hint ?? "";
+    }
+    return getInterviewPreset(interviewPresetId)?.hint ?? "";
+  }, [interviewPresetId, customScripts]);
 
   const timelineItems = useMemo(() => {
     type Tl = { kind: "session" | "bookmark"; id: string; title: string; ts: number };
@@ -506,6 +707,38 @@ export default function App() {
     setToast("已导出当前会话为 Markdown");
   }, [sessions, activeSessionId, chatMode, interviewPresetId, extraSystem, chatMessages]);
 
+  const deleteCustomScript = (id: string) => {
+    setCustomScripts((prev) => {
+      const next = prev.filter((c) => c.id !== id);
+      saveCustomInterviewScripts(next);
+      return next;
+    });
+    if (interviewPresetId === id) setInterviewPresetId("");
+  };
+
+  const addScriptFromImport = () => {
+    const p = parseInterviewScriptImport(scriptImportDraft);
+    if (!p) {
+      setErr("无法解析剧本：请使用 JSON（含 systemAppend）或首行为 # 标题的 Markdown");
+      return;
+    }
+    const neu: CustomInterviewScript = {
+      id: newCustomScriptId(),
+      label: p.label.slice(0, 120),
+      hint: p.hint,
+      systemAppend: p.systemAppend,
+      updatedAt: Date.now(),
+    };
+    setCustomScripts((prev) => {
+      const next = [neu, ...prev];
+      saveCustomInterviewScripts(next);
+      return next;
+    });
+    setScriptImportDraft("");
+    setInterviewPresetId(neu.id);
+    setToast("已新增自定义剧本并已选中");
+  };
+
   const saveNotes = async () => {
     setBusy(true);
     setErr(null);
@@ -597,6 +830,7 @@ export default function App() {
         persistToMemory: persistChatToMemory,
         extraSystem: mergedForChat,
         signal: ac.signal,
+        ragScope,
       });
     } catch (e) {
       setVaultStreaming(false);
@@ -632,6 +866,7 @@ export default function App() {
   const chartTooltipLabel = theme === "light" ? "#1a1d24" : "#e8eaef";
   const chartBarPlatform = theme === "light" ? "#0d8f6e" : "#7ee0c7";
   const chartBarSender = theme === "light" ? "#5b7fd4" : "#9db4ff";
+  const chartBarSelfSender = theme === "light" ? "#c77d00" : "#e0a74a";
 
   return (
     <div className={`layout${tab === "chat" ? " layout--wide" : ""}`}>
@@ -715,11 +950,230 @@ export default function App() {
                 <span>数据盘剩余 (GB)</span>
               </div>
             ) : null}
+            {dash.social?.tagged_self_count != null ? (
+              <div className="stat">
+                <strong>{dash.social.tagged_self_count}</strong>
+                <span>抽样中标记为「本人」的条数</span>
+              </div>
+            ) : null}
+            {dash.social?.tagged_other_count != null ? (
+              <div className="stat">
+                <strong>{dash.social.tagged_other_count}</strong>
+                <span>抽样中有 sender 且非本人</span>
+              </div>
+            ) : null}
+            {dash.social?.untagged_sender_count != null ? (
+              <div className="stat">
+                <strong>{dash.social.untagged_sender_count}</strong>
+                <span>抽样中无发送者元数据</span>
+              </div>
+            ) : null}
           </div>
           {apiHealth?.data_dir ? (
             <p className="health-path" title={apiHealth.data_dir}>
               数据目录：<code>{apiHealth.data_dir}</code>
             </p>
+          ) : null}
+
+          <div className="panel dash-scope-panel">
+            <h2>统计范围与导出</h2>
+            <p style={{ color: "var(--muted)", fontSize: "0.9rem", marginTop: 0 }}>
+              筛选作用于<strong>平台分布、发送者、相邻对、高频词、时间轴、话题簇</strong>及下方导出文件；在向量库中最多取{" "}
+              {dash.stats_sample_cap ?? 8000} 条样本。当前匹配约 <strong>{dash.stats_matching ?? "—"}</strong> 条
+              {dash.filters_active ? "（已启用筛选，画像统计为子集）" : ""}。
+            </p>
+            <div className="dash-filter-grid">
+              <label className="field">
+                平台（精确匹配）
+                <input
+                  value={dashFPlatform}
+                  onChange={(e) => setDashFPlatform(e.target.value)}
+                  placeholder="如 qq_txt、discord_csv"
+                  maxLength={128}
+                />
+              </label>
+              <label className="field">
+                时间起
+                <input
+                  value={dashFTsFrom}
+                  onChange={(e) => setDashFTsFrom(e.target.value)}
+                  placeholder="YYYY-MM-DD"
+                  maxLength={80}
+                />
+              </label>
+              <label className="field">
+                时间止
+                <input
+                  value={dashFTsTo}
+                  onChange={(e) => setDashFTsTo(e.target.value)}
+                  placeholder="YYYY-MM-DD"
+                  maxLength={80}
+                />
+              </label>
+              <label className="field">
+                会话 / 频道（metadata.thread）
+                <input
+                  value={dashFThread}
+                  onChange={(e) => setDashFThread(e.target.value)}
+                  placeholder="如 Discord 频道名；留空不限"
+                  maxLength={500}
+                  list="dash-thread-options"
+                />
+                <datalist id="dash-thread-options">
+                  {(dash.thread_options ?? []).map((t) => (
+                    <option key={t} value={t} />
+                  ))}
+                </datalist>
+              </label>
+              <label className="field">
+                发送者（依赖本人别名）
+                <select
+                  value={dashFSender}
+                  onChange={(e) => setDashFSender(e.target.value as RagSenderMode)}
+                  aria-label="仪表盘发送者筛选"
+                >
+                  <option value="any">全部</option>
+                  <option value="self_only">仅本人</option>
+                  <option value="exclude_self">排除本人</option>
+                </select>
+              </label>
+              <label className="field">
+                时间轴粒度
+                <select
+                  value={dashTimeGran}
+                  onChange={(e) => setDashTimeGran(e.target.value as "day" | "week")}
+                  aria-label="时间轴按日或按周"
+                >
+                  <option value="day">按日</option>
+                  <option value="week">按周</option>
+                </select>
+              </label>
+            </div>
+            <div className="row" style={{ marginTop: "0.65rem", flexWrap: "wrap", gap: "0.5rem" }}>
+              <button
+                type="button"
+                className="primary"
+                disabled={busy}
+                onClick={() => setAppliedDashboardQuery(buildDashQueryFromForm())}
+              >
+                应用筛选
+              </button>
+              <button
+                type="button"
+                className="ghost"
+                disabled={busy}
+                onClick={() => {
+                  setDashFPlatform("");
+                  setDashFTsFrom("");
+                  setDashFTsTo("");
+                  setDashFThread("");
+                  setDashFSender("any");
+                  setAppliedDashboardQuery({ timeline_granularity: dashTimeGran });
+                }}
+              >
+                清空筛选
+              </button>
+              <button
+                type="button"
+                className="ghost"
+                disabled={busy}
+                onClick={async () => {
+                  setBusy(true);
+                  setErr(null);
+                  try {
+                    await downloadSocialExportCsv(appliedDashboardQuery);
+                    setToast("已下载 CSV");
+                  } catch (e) {
+                    setErr(e instanceof Error ? e.message : String(e));
+                  } finally {
+                    setBusy(false);
+                  }
+                }}
+              >
+                导出关系统计 CSV
+              </button>
+              <button
+                type="button"
+                className="ghost"
+                disabled={busy}
+                onClick={async () => {
+                  setBusy(true);
+                  setErr(null);
+                  try {
+                    const data = await fetchSocialExportJson(appliedDashboardQuery);
+                    const blob = new Blob([JSON.stringify(data, null, 2)], {
+                      type: "application/json;charset=utf-8",
+                    });
+                    const u = URL.createObjectURL(blob);
+                    const a = document.createElement("a");
+                    a.href = u;
+                    a.download = "inside-me-social-export.json";
+                    a.click();
+                    URL.revokeObjectURL(u);
+                    setToast("已下载 JSON");
+                  } catch (e) {
+                    setErr(e instanceof Error ? e.message : String(e));
+                  } finally {
+                    setBusy(false);
+                  }
+                }}
+              >
+                导出 JSON
+              </button>
+            </div>
+          </div>
+
+          {(dash.timeline?.length ?? 0) > 0 ? (
+            <div className="panel">
+              <h2>时间轴（发言条数）</h2>
+              <p style={{ color: "var(--muted)", fontSize: "0.88rem", marginTop: 0 }}>
+                仅统计含有效时间戳的消息；非情绪分析，可与话题簇对照看节奏。
+              </p>
+              <div style={{ width: "100%", height: 260 }}>
+                <ResponsiveContainer>
+                  <BarChart data={dash.timeline ?? []} margin={{ left: 4, right: 8 }}>
+                    <XAxis
+                      dataKey="period"
+                      stroke={chartAxis}
+                      tick={{ fill: chartAxis, fontSize: 10 }}
+                      interval="preserveStartEnd"
+                      angle={-22}
+                      textAnchor="end"
+                      height={56}
+                    />
+                    <YAxis stroke={chartAxis} tick={{ fill: chartAxis, fontSize: 11 }} />
+                    <Tooltip contentStyle={chartTooltipStyle} labelStyle={{ color: chartTooltipLabel }} />
+                    <Bar dataKey="count" fill={chartBarPlatform} radius={[4, 4, 0, 0]} />
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+            </div>
+          ) : null}
+
+          {(dash.topics?.length ?? 0) > 0 ? (
+            <div className="panel">
+              <h2>关键词话题簇（轻量）</h2>
+              <p style={{ color: "var(--muted)", fontSize: "0.88rem", marginTop: 0 }}>
+                按高频词对消息做归类，便于跳转记忆库检索；非向量聚类。
+              </p>
+              <div className="topic-chip-row">
+                {(dash.topics ?? []).map((t) => (
+                  <button
+                    key={t.label}
+                    type="button"
+                    className="topic-chip"
+                    title="在记忆库中按该词检索正文"
+                    onClick={() => {
+                      setPendingMemorySearch(t.label);
+                      setTab("memory");
+                    }}
+                  >
+                    {t.label}
+                    <span className="topic-chip__n">{t.count}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
           ) : null}
 
           <div className="panel">
@@ -740,6 +1194,17 @@ export default function App() {
             <h2>发送者（抽样）</h2>
             <p style={{ color: "var(--muted)", fontSize: "0.9rem", marginTop: 0 }}>
               基于本地向量库中最多 {dash.social?.sample_size ?? 0} 条消息的元数据统计；无发送者列的导入会显示为「未标注」。
+              {dash.social?.self_aliases_configured ? (
+                <>
+                  {" "}
+                  已在「模型设置」配置本人别名：<strong>琥珀色柱</strong>为匹配到的本人昵称，<strong>蓝色柱</strong>为其他发送者。
+                </>
+              ) : (
+                <>
+                  {" "}
+                  在「模型设置」填写<strong>本人在导出里的昵称别名</strong>后，可在此高亮本人并用于 RAG/记忆库筛选。
+                </>
+              )}
             </p>
             {senderData.length > 0 ? (
               <div style={{ width: "100%", height: Math.min(360, 40 + senderData.length * 28) }}>
@@ -758,7 +1223,14 @@ export default function App() {
                       labelStyle={{ color: chartTooltipLabel }}
                       formatter={(v: number) => [v, "条"]}
                     />
-                    <Bar dataKey="value" fill={chartBarSender} radius={[0, 6, 6, 0]} />
+                    <Bar dataKey="value" radius={[0, 6, 6, 0]}>
+                      {senderData.map((entry, i) => (
+                        <Cell
+                          key={`sender-bar-${i}`}
+                          fill={entry.isSelf ? chartBarSelfSender : chartBarSender}
+                        />
+                      ))}
+                    </Bar>
                   </BarChart>
                 </ResponsiveContainer>
               </div>
@@ -772,13 +1244,22 @@ export default function App() {
               <h2>对话相邻（粗略）</h2>
               <p style={{ color: "var(--muted)", fontSize: "0.9rem", marginTop: 0 }}>
                 按时间排序后，紧挨两条消息且发送者不同时计数一次（反映来回对话频率，非严谨图论关系网）。
+                {dash.social?.self_aliases_configured ? (
+                  <>
+                    {" "}
+                    <strong className="pair-list__hint-self">琥珀色昵称</strong>表示该边含你在「模型设置」中配置的本人别名。
+                  </>
+                ) : null}
               </p>
               <ul className="pair-list">
                 {(dash.social?.adjacent_pairs ?? []).slice(0, 24).map((p) => (
-                  <li key={`${p.a}|${p.b}`}>
-                    <span className="pair-a">{p.a}</span>
+                  <li
+                    key={`${p.a}|${p.b}`}
+                    className={p.involves_self ? "pair-list__item--self" : undefined}
+                  >
+                    <span className={`pair-a${p.a_is_self ? " pair-list__name--self" : ""}`}>{p.a}</span>
                     <span className="pair-mid">↔</span>
-                    <span className="pair-b">{p.b}</span>
+                    <span className={`pair-b${p.b_is_self ? " pair-list__name--self" : ""}`}>{p.b}</span>
                     <span className="pair-n">{p.count}</span>
                   </li>
                 ))}
@@ -844,7 +1325,68 @@ export default function App() {
           <h2>上传聊天记录</h2>
           <p style={{ color: "var(--muted)", fontSize: "0.9rem", marginTop: 0 }}>
             支持 QQ TXT、微信风格 TXT、微博时间块、Telegram JSON、Discord/类 CSV、通用逐行等。可先预览再导入；默认按内容哈希去重。
+            大文件可用<strong>后台导入</strong>：分批写入向量库并显示进度，可随时取消（已写入部分会保留）。
           </p>
+          <details className="import-sender-fold">
+            <summary>「发送者」是谁？怎么区分我和对方？</summary>
+            <div className="import-sender-fold__body">
+              <p>
+                程序<strong>不会猜测</strong>哪条是你、哪条是别人：只读取<strong>导出文件里已经写好的昵称/帐号</strong>，原样写入每条记忆的{" "}
+                <code>sender</code> 元数据，供检索预览与统计展示。
+              </p>
+              <ul>
+                <li>
+                  <strong>QQ TXT</strong>：时间行里的昵称（如带 QQ 号括号 <code>昵称(123456789)</code> 或邮箱形态）→ sender
+                </li>
+                <li>
+                  <strong>微信风格 TXT</strong>：<code>日期时间 + 昵称</code> 单独一行，其下一行起为正文 → sender 为该行昵称
+                </li>
+                <li>
+                  <strong>Telegram JSON</strong>：每条消息的 <code>from</code>（名字/用户名）
+                </li>
+                <li>
+                  <strong>Discord / 类 CSV</strong>：<code>author</code>、<code>username</code> 等列
+                </li>
+                <li>
+                  <strong>通用逐行</strong>：形如 <code>名字：内容</code> 时，冒号前为 sender
+                </li>
+                <li>
+                  <strong>微博时间块</strong>：若导出里没有说话人字段，sender 可能为空
+                </li>
+              </ul>
+              <p>
+                仪表盘里的「发送者」统计会列出所有不同的 sender 字符串；要对应到「我自己」，请对照<strong>你在该平台上导出时的昵称</strong>，并在<strong>「模型设置 → 本人在导出记录里的昵称别名」</strong>中填写（可多条），即可高亮本人并用于 RAG/记忆库筛选。若原始文件格式混乱，解析器可能无法拆出 sender，整条会当作正文处理。
+              </p>
+            </div>
+          </details>
+          {importJobId && importJobStatus ? (
+            <div className="import-job-panel" role="status">
+              <div className="import-job-panel__head">
+                <strong>后台任务</strong>
+                <span className="import-job-panel__fn">{importJobStatus.filename}</span>
+                <span className="import-job-panel__st">{importJobStatus.status}</span>
+              </div>
+              {(importJobStatus.embedded_total ?? 0) > 0 ? (
+                <progress
+                  className="import-job-panel__bar"
+                  value={importJobStatus.embedded_done}
+                  max={importJobStatus.embedded_total ?? 1}
+                />
+              ) : null}
+              <button
+                type="button"
+                className="ghost"
+                disabled={!["queued", "parsing", "embedding", "profile"].includes(importJobStatus.status)}
+                onClick={() => {
+                  void cancelImportJob(importJobId).then((r) => {
+                    if (r.ok) setToast("已请求取消（下一批写入前生效）");
+                  });
+                }}
+              >
+                取消任务
+              </button>
+            </div>
+          ) : null}
           <label className="chat-opt" style={{ marginBottom: "0.75rem" }}>
             <input type="checkbox" checked={importDedupe} onChange={(e) => setImportDedupe(e.target.checked)} />
             <span>导入时跳过与库内完全重复的句子</span>
@@ -885,38 +1427,63 @@ export default function App() {
                   </li>
                 ))}
               </ul>
-              <button
-                type="button"
-                className="primary"
-                disabled={busy || !pendingImportFileRef.current}
-                onClick={async () => {
-                  const f = pendingImportFileRef.current;
-                  if (!f) {
-                    setErr("请先选择文件");
-                    return;
-                  }
-                  setBusy(true);
-                  setErr(null);
-                  try {
-                    const r = await importFile(f, importDedupe);
-                    const skip = r.skipped_duplicates ?? 0;
-                    setToast(
-                      skip
-                        ? `新增 ${r.imported} 条、跳过重复 ${skip} 条（${r.platform}）`
-                        : `已导入 ${r.imported} 条（${r.platform}）`,
-                    );
-                    setImportPreviewData(null);
-                    pendingImportFileRef.current = null;
-                    await refresh();
-                  } catch (ex) {
-                    setErr(ex instanceof Error ? ex.message : String(ex));
-                  } finally {
-                    setBusy(false);
-                  }
-                }}
-              >
-                确认导入
-              </button>
+              <div className="import-preview__actions">
+                <button
+                  type="button"
+                  className="primary"
+                  disabled={busy || !pendingImportFileRef.current || Boolean(importJobId)}
+                  onClick={async () => {
+                    const f = pendingImportFileRef.current;
+                    if (!f) {
+                      setErr("请先选择文件");
+                      return;
+                    }
+                    setBusy(true);
+                    setErr(null);
+                    try {
+                      const r = await importFile(f, importDedupe);
+                      const skip = r.skipped_duplicates ?? 0;
+                      setToast(
+                        skip
+                          ? `新增 ${r.imported} 条、跳过重复 ${skip} 条（${r.platform}）`
+                          : `已导入 ${r.imported} 条（${r.platform}）`,
+                      );
+                      setImportPreviewData(null);
+                      pendingImportFileRef.current = null;
+                      await refresh();
+                    } catch (ex) {
+                      setErr(ex instanceof Error ? ex.message : String(ex));
+                    } finally {
+                      setBusy(false);
+                    }
+                  }}
+                >
+                  确认导入（同步）
+                </button>
+                <button
+                  type="button"
+                  className="ghost"
+                  disabled={busy || !pendingImportFileRef.current || Boolean(importJobId)}
+                  onClick={async () => {
+                    const f = pendingImportFileRef.current;
+                    if (!f) {
+                      setErr("请先选择文件");
+                      return;
+                    }
+                    setErr(null);
+                    try {
+                      const { job_id } = await startImportJob(f, importDedupe);
+                      setImportJobStatus(null);
+                      setImportJobId(job_id);
+                      setToast("已加入后台导入队列");
+                    } catch (ex) {
+                      setErr(ex instanceof Error ? ex.message : String(ex));
+                    }
+                  }}
+                >
+                  后台导入（进度条）
+                </button>
+              </div>
             </div>
           ) : null}
         </div>
@@ -927,6 +1494,8 @@ export default function App() {
           onChanged={() => void refresh()}
           onToast={(s) => setToast(s)}
           onErr={(s) => setErr(s)}
+          pendingSearch={pendingMemorySearch}
+          onConsumedPendingSearch={() => setPendingMemorySearch(null)}
         />
       )}
 
@@ -988,6 +1557,155 @@ export default function App() {
                 placeholder="例如：回答时多用短句；或扮演更理性的自己复盘情绪…"
               />
             </label>
+            {settings.chat_quick_prompts.length > 0 ? (
+              <div className="chat-template-row">
+                <span className="chat-template-row__label">快捷问句</span>
+                <div className="chat-template-row__btns">
+                  {settings.chat_quick_prompts.map((line) => (
+                    <button
+                      key={line}
+                      type="button"
+                      className="ghost chat-template-chip"
+                      onClick={() => setInput((prev) => (prev.trim() ? `${prev.trim()}\n\n${line}` : line))}
+                    >
+                      {line.length > 42 ? `${line.slice(0, 40)}…` : line}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+            {settings.chat_prompt_templates.length > 0 ? (
+              <div className="chat-template-row">
+                <span className="chat-template-row__label">系统片段</span>
+                <div className="chat-template-row__btns">
+                  {settings.chat_prompt_templates.map((tpl) => (
+                    <button
+                      key={tpl.name + tpl.body.slice(0, 12)}
+                      type="button"
+                      className="ghost chat-template-chip"
+                      title={tpl.body}
+                      onClick={() =>
+                        setExtraSystem((prev) => {
+                          const b = tpl.body.trim();
+                          if (!b) return prev;
+                          return prev.trim() ? `${prev.trim()}\n\n${b}` : b;
+                        })
+                      }
+                    >
+                      {tpl.name || "未命名片段"}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+            <details className="chat-archives-fold">
+              <summary>服务端会话存档（写入数据目录）</summary>
+              <p className="preset-hint">
+                将当前会话消息与「人设」保存到本机，便于换设备前备份或做版本对比。与浏览器 localStorage 里的多会话并行存在。
+              </p>
+              <div className="chat-archives-fold__row">
+                <label className="field chat-archives-fold__name">
+                  存档名称
+                  <input
+                    value={archiveNameDraft}
+                    onChange={(e) => setArchiveNameDraft(e.target.value)}
+                    placeholder={sessions.find((s) => s.id === activeSessionId)?.title ?? "未命名"}
+                    maxLength={120}
+                  />
+                </label>
+                <button
+                  type="button"
+                  className="primary"
+                  disabled={busy}
+                  onClick={async () => {
+                    setBusy(true);
+                    setErr(null);
+                    try {
+                      const title =
+                        archiveNameDraft.trim() ||
+                        sessions.find((s) => s.id === activeSessionId)?.title ||
+                        "会话存档";
+                      await createChatArchive({
+                        name: title,
+                        messages: chatMessages,
+                        extra_system: extraSystem.trim() || null,
+                      });
+                      setToast("已保存存档");
+                      setArchiveNameDraft("");
+                      const r = await listChatArchives();
+                      setChatArchives(r.archives);
+                    } catch (e) {
+                      setErr(e instanceof Error ? e.message : String(e));
+                    } finally {
+                      setBusy(false);
+                    }
+                  }}
+                >
+                  保存当前会话
+                </button>
+              </div>
+              {chatArchives.length > 0 ? (
+                <ul className="chat-archives-fold__list">
+                  {chatArchives.map((a) => (
+                    <li key={a.id}>
+                      <span className="chat-archives-fold__title">
+                        {a.name}{" "}
+                        <small className="preset-hint">
+                          {a.message_count} 条 · {a.created_at ? new Date(a.created_at).toLocaleString() : ""}
+                        </small>
+                      </span>
+                      <button
+                        type="button"
+                        className="ghost"
+                        disabled={busy}
+                        onClick={async () => {
+                          setBusy(true);
+                          setErr(null);
+                          try {
+                            const { archive } = await getChatArchive(a.id);
+                            const msgs = archive.messages as ChatMessage[];
+                            if (!Array.isArray(msgs)) throw new Error("存档格式异常");
+                            setChatMessages(msgs);
+                            setExtraSystem(archive.extra_system ?? "");
+                            setToast(`已载入：${archive.name}`);
+                          } catch (e) {
+                            setErr(e instanceof Error ? e.message : String(e));
+                          } finally {
+                            setBusy(false);
+                          }
+                        }}
+                      >
+                        载入
+                      </button>
+                      <button
+                        type="button"
+                        className="ghost danger-outline"
+                        disabled={busy}
+                        onClick={async () => {
+                          if (!window.confirm(`删除存档「${a.name}」？`)) return;
+                          setBusy(true);
+                          setErr(null);
+                          try {
+                            await deleteChatArchive(a.id);
+                            setToast("已删除存档");
+                            const r = await listChatArchives();
+                            setChatArchives(r.archives);
+                          } catch (e) {
+                            setErr(e instanceof Error ? e.message : String(e));
+                          } finally {
+                            setBusy(false);
+                          }
+                        }}
+                      >
+                        删除
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p className="preset-hint">暂无服务端存档。</p>
+              )}
+            </details>
             <p className="chat-lead">
               左侧为<strong>记忆档案</strong>：随输入实时预览检索；发送后模型流式回复时抽屉会<strong>逐条点亮</strong>。默认已预置一段开场白，你可直接改发。勾选「写入本地记忆」时，每轮你与助手的完整句子会进入向量库，与导入的聊天记录一起参与后续 RAG。快捷键：<kbd>Esc</kbd>{" "}
               停止生成；<kbd>⌘</kbd>/<kbd>Ctrl</kbd>+<kbd>Enter</kbd> 发送。
@@ -996,6 +1714,66 @@ export default function App() {
               <input type="checkbox" checked={rag} onChange={(e) => setRag(e.target.checked)} />
               <span>启用本地向量检索（RAG）</span>
             </label>
+            {rag ? (
+              <details className="rag-scope-fold">
+                <summary>RAG 检索范围（可选，与记忆库筛选一致）</summary>
+                <div className="rag-scope-fold__grid">
+                  <label className="field rag-scope-fold__field">
+                    平台（精确匹配元数据）
+                    <input
+                      value={ragPlatform}
+                      onChange={(e) => setRagPlatform(e.target.value)}
+                      placeholder="如 qq_txt、wechat 等，留空则不限"
+                      maxLength={128}
+                    />
+                  </label>
+                  <label className="field rag-scope-fold__field">
+                    时间起（含）
+                    <input
+                      value={ragTsFrom}
+                      onChange={(e) => setRagTsFrom(e.target.value)}
+                      placeholder="如 2024-01-01"
+                      maxLength={80}
+                    />
+                  </label>
+                  <label className="field rag-scope-fold__field">
+                    时间止（含当日）
+                    <input
+                      value={ragTsTo}
+                      onChange={(e) => setRagTsTo(e.target.value)}
+                      placeholder="如 2024-12-31"
+                      maxLength={80}
+                    />
+                  </label>
+                  <label className="field rag-scope-fold__field">
+                    会话 / 频道（thread）
+                    <input
+                      value={ragThread}
+                      onChange={(e) => setRagThread(e.target.value)}
+                      placeholder="与导入 metadata.thread 一致，留空不限"
+                      maxLength={500}
+                    />
+                  </label>
+                  <label className="field rag-scope-fold__field">
+                    发送者（依赖「模型设置」中的本人别名）
+                    <select
+                      value={ragSenderMode}
+                      onChange={(e) => setRagSenderMode(e.target.value as RagSenderMode)}
+                      aria-label="RAG 发送者筛选"
+                    >
+                      <option value="any">不限</option>
+                      <option value="self_only">仅本人发言</option>
+                      <option value="exclude_self">排除本人（多看他人对我说的话）</option>
+                    </select>
+                  </label>
+                </div>
+                <p className="rag-scope-fold__hint">
+                  仅影响向量检索命中；不设平台时仍可按时间在后端多取候选再过滤。无时间戳的记忆在启用时间筛选时会被排除。
+                  「仅本人/排除本人」须在设置里填写与导出一致的昵称；未配置别名时这两项不会生效。会话筛选依赖导入时写入的{" "}
+                  <code>thread</code>（如 Discord CSV 的频道列）。
+                </p>
+              </details>
+            ) : null}
             <label className="chat-opt">
               <input
                 type="checkbox"
@@ -1013,21 +1791,65 @@ export default function App() {
               <span>深度访谈模式（澄清式提问；非专业心理咨询）</span>
             </label>
             {chatMode === "interview" ? (
-              <label className="field chat-preset">
-                访谈剧本（合并进系统提示，可与下方「人设」同发）
-                <select
-                  value={interviewPresetId}
-                  onChange={(e) => setInterviewPresetId(e.target.value)}
-                  aria-label="访谈剧本"
-                >
-                  {INTERVIEW_PRESETS.map((p) => (
-                    <option key={p.id || "none"} value={p.id}>
-                      {p.label}
-                    </option>
-                  ))}
-                </select>
-                <span className="preset-hint">{getInterviewPreset(interviewPresetId)?.hint ?? ""}</span>
-              </label>
+              <div className="chat-preset-block">
+                <label className="field chat-preset">
+                  访谈剧本（合并进系统提示，可与下方「人设」同发）
+                  <select
+                    value={interviewPresetId}
+                    onChange={(e) => setInterviewPresetId(e.target.value)}
+                    aria-label="访谈剧本"
+                  >
+                    <optgroup label="内置">
+                      {INTERVIEW_PRESETS.map((p) => (
+                        <option key={p.id || "none"} value={p.id}>
+                          {p.label}
+                        </option>
+                      ))}
+                    </optgroup>
+                    {customScripts.length > 0 ? (
+                      <optgroup label="自定义（仅本机浏览器）">
+                        {customScripts.map((c) => (
+                          <option key={c.id} value={c.id}>
+                            {c.label}
+                          </option>
+                        ))}
+                      </optgroup>
+                    ) : null}
+                  </select>
+                  <span className="preset-hint">{interviewHintText}</span>
+                </label>
+                <details className="interview-custom-fold">
+                  <summary>自定义剧本：导入 / 管理</summary>
+                  <p className="preset-hint">
+                    支持 JSON：<code>{`{"label":"标题","systemAppend":"……"}`}</code>；或 Markdown 首行{" "}
+                    <code># 标题</code>，其余为剧本正文。
+                  </p>
+                  <textarea
+                    rows={5}
+                    className="interview-custom-fold__ta"
+                    value={scriptImportDraft}
+                    onChange={(e) => setScriptImportDraft(e.target.value)}
+                    placeholder="粘贴 JSON 或 Markdown…"
+                  />
+                  <div className="interview-custom-fold__row">
+                    <button type="button" className="ghost" onClick={addScriptFromImport}>
+                      解析并新增
+                    </button>
+                  </div>
+                  {customScripts.length > 0 ? (
+                    <ul className="interview-custom-fold__list">
+                      {customScripts.map((c) => (
+                        <li key={c.id}>
+                          <span className="interview-custom-fold__name">{c.label}</span>
+                          <button type="button" className="ghost interview-custom-fold__del" onClick={() => deleteCustomScript(c.id)}>
+                            删除
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  ) : null}
+                </details>
+              </div>
             ) : null}
             {timelineItems.length > 0 ? (
               <details className="timeline-fold">
@@ -1287,6 +2109,29 @@ export default function App() {
             />
           </label>
 
+          <h3 className="settings-sub">身份与记忆（发送者）</h3>
+          <label className="field">
+            本人在导出记录里的昵称 / 帐号别名
+            <textarea
+              rows={4}
+              value={settings.self_sender_aliases.join("\n")}
+              onChange={(e) =>
+                setSettings({
+                  ...settings,
+                  self_sender_aliases: e.target.value
+                    .split("\n")
+                    .map((x) => x.trim())
+                    .filter(Boolean)
+                    .slice(0, 32),
+                })
+              }
+              placeholder={"每行一个，与 QQ/微信/Telegram 等导出里的 sender 一致；也可只填「昵称」以匹配「昵称(123456789)」形态"}
+            />
+          </label>
+          <p style={{ color: "var(--muted)", fontSize: "0.85rem", marginTop: "0.35rem", lineHeight: 1.5 }}>
+            保存后写入本机 <code>settings.json</code>。用于：仪表盘发送者高亮、RAG「仅本人/排除本人」、记忆库浏览筛选。最多 32 条，比对时<strong>不区分英文大小写</strong>。
+          </p>
+
           <h3 className="settings-sub">对话（Chat / 补全）</h3>
           <label className="field">
             对话模型 ID
@@ -1294,6 +2139,30 @@ export default function App() {
               value={settings.model}
               onChange={(e) => setSettings({ ...settings, model: e.target.value })}
               placeholder="如 doubao-seed-… 或 ep-xxxx（聊天用）"
+            />
+          </label>
+
+          <h3 className="settings-sub">对话模板（本机）</h3>
+          <p style={{ color: "var(--muted)", fontSize: "0.88rem", marginTop: 0 }}>
+            快捷问句会出现在对话页一键插入输入框；系统片段会追加到「人设 / 系统补充」文本框。均为本地 settings.json。
+          </p>
+          <label className="field">
+            自定义系统片段（JSON 数组，每项含 name、body）
+            <textarea
+              rows={8}
+              className="settings-templates-json"
+              value={templatesJsonDraft}
+              onChange={(e) => setTemplatesJsonDraft(e.target.value)}
+              placeholder='[{"name":"更短句","body":"回答尽量简短，少用比喻。"}]'
+            />
+          </label>
+          <label className="field" style={{ marginTop: "0.65rem" }}>
+            快捷问句（每行一条，最多 24 条）
+            <textarea
+              rows={5}
+              value={quickPromptsDraft}
+              onChange={(e) => setQuickPromptsDraft(e.target.value)}
+              placeholder={"最近一周我最反复纠结的是什么？\n如果把这段对话写给五年后的自己，我会补一句什么？"}
             />
           </label>
 
@@ -1364,10 +2233,41 @@ export default function App() {
                     return;
                   }
                 }
-                await saveSettings(settings);
+                let parsedTemplates: { name: string; body: string }[] = [];
+                try {
+                  const raw = JSON.parse(templatesJsonDraft || "[]") as unknown;
+                  if (!Array.isArray(raw)) throw new Error("模板须为 JSON 数组");
+                  parsedTemplates = raw
+                    .map((x) => {
+                      if (!x || typeof x !== "object") return null;
+                      const o = x as { name?: unknown; body?: unknown };
+                      return {
+                        name: String(o.name ?? "").slice(0, 80),
+                        body: String(o.body ?? "").slice(0, 8000),
+                      };
+                    })
+                    .filter((x): x is { name: string; body: string } => Boolean(x && (x.name || x.body)))
+                    .slice(0, 24);
+                } catch {
+                  setErr("自定义系统片段 JSON 无法解析，请检查格式。");
+                  setBusy(false);
+                  return;
+                }
+                const quickLines = quickPromptsDraft
+                  .split(/\n/)
+                  .map((x) => x.trim())
+                  .filter(Boolean)
+                  .slice(0, 24);
+                await saveSettings({
+                  ...settings,
+                  chat_prompt_templates: parsedTemplates,
+                  chat_quick_prompts: quickLines,
+                });
                 setToast("设置已保存");
                 const s = await getSettings();
                 setSettings(s);
+                setTemplatesJsonDraft(JSON.stringify(s.chat_prompt_templates ?? [], null, 2));
+                setQuickPromptsDraft((s.chat_quick_prompts ?? []).join("\n"));
               } catch (e) {
                 setErr(e instanceof Error ? e.message : String(e));
               } finally {
