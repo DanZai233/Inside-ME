@@ -3,12 +3,21 @@ from __future__ import annotations
 from pathlib import Path
 
 from inside_me.parsers.base import ParsedMessage
+from inside_me.parsers.discord_csv import DiscordCsvParser
 from inside_me.parsers.generic import GenericLineParser
 from inside_me.parsers.qq_txt import QQTxtParser
+from inside_me.parsers.telegram_export import TelegramExportParser
 from inside_me.parsers.wechat_style import WeChatStyleParser
 from inside_me.parsers.weibo_style import WeiboStyleParser
 
-_PARSERS = [QQTxtParser(), WeChatStyleParser(), WeiboStyleParser(), GenericLineParser()]
+_PARSERS = [
+    QQTxtParser(),
+    WeChatStyleParser(),
+    WeiboStyleParser(),
+    TelegramExportParser(),
+    DiscordCsvParser(),
+    GenericLineParser(),
+]
 
 
 def _weibo_only_header_lines(content: str) -> int:

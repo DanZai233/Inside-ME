@@ -1,3 +1,23 @@
+const LS_API_BEARER = "inside-me-ui-bearer";
+
+export function getUiApiBearer(): string {
+  if (typeof localStorage === "undefined") return "";
+  return localStorage.getItem(LS_API_BEARER) ?? "";
+}
+
+export function setUiApiBearer(token: string): void {
+  if (typeof localStorage === "undefined") return;
+  const t = token.trim();
+  if (t) localStorage.setItem(LS_API_BEARER, t);
+  else localStorage.removeItem(LS_API_BEARER);
+}
+
+function authHeaders(base: Record<string, string> = {}): Record<string, string> {
+  const t = getUiApiBearer().trim();
+  if (!t) return { ...base };
+  return { ...base, Authorization: `Bearer ${t}` };
+}
+
 async function parseError(res: Response): Promise<string> {
   try {
     const t = await res.text();
@@ -15,20 +35,33 @@ async function parseError(res: Response): Promise<string> {
   }
 }
 
+export type ApiHealth = {
+  status: string;
+  vectors?: number;
+  data_dir?: string;
+  disk_free_gb?: number | null;
+};
+
 export async function getHealth(): Promise<{ status: string }> {
   const r = await fetch("/health");
   if (!r.ok) throw new Error(await parseError(r));
   return r.json();
 }
 
+export async function getApiHealth(): Promise<ApiHealth> {
+  const r = await fetch("/api/health", { headers: authHeaders() });
+  if (!r.ok) throw new Error(await parseError(r));
+  return r.json();
+}
+
 export async function getDashboard(): Promise<DashboardResponse> {
-  const r = await fetch("/api/dashboard");
+  const r = await fetch("/api/dashboard", { headers: authHeaders() });
   if (!r.ok) throw new Error(await parseError(r));
   return r.json();
 }
 
 export async function getSettings(): Promise<UserSettings> {
-  const r = await fetch("/api/settings");
+  const r = await fetch("/api/settings", { headers: authHeaders() });
   if (!r.ok) throw new Error(await parseError(r));
   const s = (await r.json()) as Partial<UserSettings>;
   return {
@@ -44,16 +77,45 @@ export async function getSettings(): Promise<UserSettings> {
 export async function saveSettings(body: UserSettings): Promise<void> {
   const r = await fetch("/api/settings", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify(body),
   });
   if (!r.ok) throw new Error(await parseError(r));
 }
 
-export async function importFile(file: File): Promise<{ imported: number; platform: string }> {
+export type ImportResult = {
+  imported: number;
+  skipped_duplicates: number;
+  platform: string;
+  parsed_messages: number;
+};
+
+export async function importFile(file: File, dedupe = true): Promise<ImportResult> {
   const fd = new FormData();
   fd.append("file", file);
-  const r = await fetch("/api/import", { method: "POST", body: fd });
+  const q = dedupe ? "" : "?dedupe=false";
+  const r = await fetch(`/api/import${q}`, { method: "POST", body: fd, headers: authHeaders() });
+  if (!r.ok) throw new Error(await parseError(r));
+  return r.json();
+}
+
+export type ImportPreviewRow = {
+  text: string;
+  sender: string | null;
+  ts: string;
+  platform: string;
+};
+
+export type ImportPreviewResult = {
+  platform: string;
+  total_parsed: number;
+  preview: ImportPreviewRow[];
+};
+
+export async function importPreview(file: File): Promise<ImportPreviewResult> {
+  const fd = new FormData();
+  fd.append("file", file);
+  const r = await fetch("/api/import/preview", { method: "POST", body: fd, headers: authHeaders() });
   if (!r.ok) throw new Error(await parseError(r));
   return r.json();
 }
@@ -71,7 +133,7 @@ export type RagHit = {
 export async function fetchRagPreview(query: string, n = 8): Promise<{ rag_hits: RagHit[] }> {
   const r = await fetch("/api/chat/rag-preview", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify({ query, n }),
   });
   if (!r.ok) throw new Error(await parseError(r));
@@ -84,16 +146,18 @@ export async function chat(
   chatMode: "default" | "interview" = "default",
   pinnedContext: string | null = null,
   persistToMemory = true,
+  extraSystem: string | null = null,
 ): Promise<{ reply: string; rag_hits: RagHit[] }> {
   const r = await fetch("/api/chat", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify({
       messages,
       use_rag: useRag,
       chat_mode: chatMode,
       pinned_context: pinnedContext || null,
       persist_to_memory: persistToMemory,
+      extra_system: extraSystem?.trim() || null,
     }),
   });
   if (!r.ok) throw new Error(await parseError(r));
@@ -107,6 +171,12 @@ export type ChatStreamHandlers = {
   onError: (message: string) => void;
 };
 
+export type ChatStreamOptions = {
+  persistToMemory?: boolean;
+  extraSystem?: string | null;
+  signal?: AbortSignal;
+};
+
 /** SSE：首帧 meta，随后 delta，结束 done；错误帧 error。 */
 export async function chatStream(
   messages: ChatMessage[],
@@ -114,19 +184,34 @@ export async function chatStream(
   chatMode: "default" | "interview",
   pinnedContext: string | null,
   handlers: ChatStreamHandlers,
-  persistToMemory = true,
+  options: ChatStreamOptions = {},
 ): Promise<void> {
-  const r = await fetch("/api/chat/stream", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      messages,
-      use_rag: useRag,
-      chat_mode: chatMode,
-      pinned_context: pinnedContext || null,
-      persist_to_memory: persistToMemory,
-    }),
-  });
+  const { persistToMemory = true, extraSystem = null, signal } = options;
+  let r: Response;
+  try {
+    r = await fetch("/api/chat/stream", {
+      method: "POST",
+      headers: authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({
+        messages,
+        use_rag: useRag,
+        chat_mode: chatMode,
+        pinned_context: pinnedContext || null,
+        persist_to_memory: persistToMemory,
+        extra_system: extraSystem?.trim() || null,
+      }),
+      signal,
+    });
+  } catch (e) {
+    const aborted =
+      signal?.aborted ||
+      (typeof DOMException !== "undefined" &&
+        e instanceof DOMException &&
+        e.name === "AbortError");
+    if (aborted) handlers.onError("已停止生成");
+    else handlers.onError(e instanceof Error ? e.message : String(e));
+    return;
+  }
   if (!r.ok) {
     handlers.onError(await parseError(r));
     return;
@@ -140,7 +225,24 @@ export async function chatStream(
   let buffer = "";
   try {
     while (true) {
-      const { done, value } = await reader.read();
+      let done: boolean;
+      let value: Uint8Array | undefined;
+      try {
+        const chunk = await reader.read();
+        done = chunk.done;
+        value = chunk.value;
+      } catch (e) {
+        const aborted =
+          signal?.aborted ||
+          (typeof DOMException !== "undefined" &&
+            e instanceof DOMException &&
+            e.name === "AbortError");
+        if (aborted) {
+          handlers.onError("已停止生成");
+          return;
+        }
+        throw e;
+      }
       buffer += decoder.decode(value ?? new Uint8Array(), { stream: !done });
       let sep: number;
       while ((sep = buffer.indexOf("\n\n")) !== -1) {
@@ -181,7 +283,7 @@ export async function chatStream(
 export async function summarizeProfile(useLlm: boolean): Promise<{ profile: Profile }> {
   const r = await fetch("/api/profile/summarize", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify({ use_llm: useLlm }),
   });
   if (!r.ok) throw new Error(await parseError(r));
@@ -191,7 +293,7 @@ export async function summarizeProfile(useLlm: boolean): Promise<{ profile: Prof
 export async function exportSkill(skillName: string, useLlm: boolean): Promise<{ path: string }> {
   const r = await fetch("/api/skill/export", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify({ skill_name: skillName, use_llm: useLlm }),
   });
   if (!r.ok) throw new Error(await parseError(r));
@@ -205,11 +307,67 @@ export async function patchProfile(patch: {
 }): Promise<Profile> {
   const r = await fetch("/api/profile", {
     method: "PATCH",
-    headers: { "Content-Type": "application/json" },
+    headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify(patch),
   });
   if (!r.ok) throw new Error(await parseError(r));
   return r.json();
+}
+
+export async function browseMemory(params: {
+  limit?: number;
+  offset?: number;
+  platform?: string;
+  q?: string;
+}): Promise<{ items: RagHit[] }> {
+  const sp = new URLSearchParams();
+  if (params.limit != null) sp.set("limit", String(params.limit));
+  if (params.offset != null) sp.set("offset", String(params.offset));
+  if (params.platform?.trim()) sp.set("platform", params.platform.trim());
+  if (params.q?.trim()) sp.set("q", params.q.trim());
+  const q = sp.toString();
+  const r = await fetch(`/api/memory/browse${q ? `?${q}` : ""}`, { headers: authHeaders() });
+  if (!r.ok) throw new Error(await parseError(r));
+  return r.json();
+}
+
+export async function deleteMemoryIds(ids: string[]): Promise<{ deleted: number }> {
+  const r = await fetch("/api/memory/delete", {
+    method: "POST",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify({ ids }),
+  });
+  if (!r.ok) throw new Error(await parseError(r));
+  return r.json();
+}
+
+export async function patchMemoryItem(body: {
+  id: string;
+  document?: string;
+  sender?: string;
+  platform?: string;
+  ts?: string;
+}): Promise<{ ok: boolean }> {
+  const r = await fetch("/api/memory/item", {
+    method: "PATCH",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify(body),
+  });
+  if (!r.ok) throw new Error(await parseError(r));
+  return r.json();
+}
+
+/** 通过 fetch（含可选 Bearer）下载 inside-me-backup.zip */
+export async function downloadBackup(): Promise<void> {
+  const r = await fetch("/api/backup/download", { headers: authHeaders() });
+  if (!r.ok) throw new Error(await parseError(r));
+  const blob = await r.blob();
+  const u = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = u;
+  a.download = "inside-me-backup.zip";
+  a.click();
+  URL.revokeObjectURL(u);
 }
 
 export type ChatMessage = { role: "user" | "assistant" | "system"; content: string };

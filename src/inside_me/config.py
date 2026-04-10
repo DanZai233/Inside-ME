@@ -14,6 +14,8 @@ class Settings(BaseSettings):
     profile_file: str = "profile.json"
 
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
+    # 非空时，所有 /api/* 请求需带 Header: Authorization: Bearer <token>（/api/health 除外）
+    api_bearer_token: str = ""
     # 若存在且为目录，则在根路径托管前端静态资源（如 Vite build 的 dist）；与 /api 同端口即同源
     static_dir: Path | None = None
 

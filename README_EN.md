@@ -207,6 +207,7 @@ Override root with **`INSIDE_ME_DATA_DIR`**.
 | **`INSIDE_ME_DATA_DIR`** | Data root (default `~/.inside-me`) |
 | **`INSIDE_ME_STATIC_DIR`** | Path to Vite `dist` → static + `/api` on one port |
 | **`INSIDE_ME_CORS_ORIGINS`** | Comma-separated browser origins |
+| **`INSIDE_ME_API_BEARER_TOKEN`** | If set, all `/api/*` except `/api/health` require `Authorization: Bearer <token>`; enter the same token in the web UI **Settings** |
 
 See `src/inside_me/config.py` for more.
 
@@ -224,6 +225,7 @@ docker compose up -d --build
 **http://localhost:8080**
 
 - Volume **`inside_me_data`** → **`/data`**; or bind `- ./inside-me-data:/data`
+- **Health check** (in Compose): hits **`/api/health`** (vector count, disk free, etc.; no Bearer required unless you customize the app).
 - Change **`ports`** and **`INSIDE_ME_CORS_ORIGINS`** together
 - Build only: `docker build -t inside-me .`
 
@@ -250,7 +252,7 @@ docker run -d --name inside-me -p 8080:8000 -v inside_me_data:/data inside-me:lo
 
 ## Repository layout
 
-- `src/inside_me/` — parsers, Chroma, profile, Skill generator, FastAPI, `POST /api/chat`, **`POST /api/chat/stream`**
+- `src/inside_me/` — parsers, Chroma, profile, Skill generator, FastAPI, `POST /api/chat`, **`POST /api/chat/stream`**; memory **`GET /api/memory/browse`** (case-insensitive substring), **`PATCH /api/memory/item`** (edit body/metadata, re-embed), **`POST /api/memory/delete`**
 - `frontend/` — React + Vite (vault, streaming, dashboard)
 - `Dockerfile`, `docker-compose.yml`
 - `scripts/` — dev helpers
@@ -259,12 +261,14 @@ docker run -d --name inside-me -p 8080:8000 -v inside_me_data:/data inside-me:lo
 
 ## Roadmap (ideas)
 
+Shipped in recent builds: optional API bearer, `/api/health` details, import preview + dedupe, memory browse/delete, backup zip, Telegram/Discord parsers, stream abort, multi-session drafts, persona (`extra_system`), bookmarks, TTS, citation fold, light theme, Docker health on `/api/health`.
+
 | Area | Ideas |
 |------|--------|
-| Soul Q&A | Interview script presets; bookmarks / timelines |
-| Memory | Search by keyword/time; edit rows; dedupe imports |
-| Chat | Stop generation; multiple session drafts |
-| Ops / UX | Richer health checks, themes, mobile layout |
+| Soul Q&A | Interview script presets; timelines |
+| Memory | Edit rows in place; stronger full-text UX |
+| Chat | Voice input; export single session |
+| Ops / UX | Structured logging; metrics |
 
 ---
 

@@ -12,8 +12,8 @@ from inside_me.analysis.profile import (
     save_profile,
 )
 from inside_me.config import get_settings
-from inside_me.prefs import load_user_settings
 from inside_me.parsers import parse_chat_file
+from inside_me.prefs import load_user_settings
 from inside_me.skill.generator import export_skill_dir, validate_skill_name
 from inside_me.store import MessageStore
 
@@ -33,6 +33,7 @@ def serve(
 @app.command("import")
 def import_file(
     path: Path = typer.Argument(..., exists=True, readable=True, path_type=Path),
+    no_dedupe: bool = typer.Option(False, "--no-dedupe", help="关闭内容去重，全部写入向量库"),
 ) -> None:
     """导入聊天记录文件到本地向量库。"""
     settings = get_settings()
@@ -51,12 +52,17 @@ def import_file(
         }
         for m in messages
     ]
-    n = store.add_messages(texts, metas, source=platform)
+    added, skipped = store.add_messages(texts, metas, source=platform, dedupe=not no_dedupe)
     prev = load_profile(settings.profile_path)
     fresh = build_profile_from_store(store, previous=prev)
     merged = merge_profile_json(prev, fresh) if prev else fresh
     save_profile(settings.profile_path, merged)
-    typer.echo(f"已写入 {n} 条向量，解析平台: {platform}，画像已更新。")
+    if skipped:
+        typer.echo(
+            f"新增 {added} 条、跳过重复 {skipped} 条，解析平台: {platform}，画像已更新。"
+        )
+    else:
+        typer.echo(f"已写入 {added} 条向量，解析平台: {platform}，画像已更新。")
 
 
 @app.command()

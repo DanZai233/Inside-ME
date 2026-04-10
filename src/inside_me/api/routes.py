@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import io
 import json
 import logging
+import shutil
+import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -21,6 +24,8 @@ from inside_me.analysis.profile import (
 )
 from inside_me.api.schemas import (
     ChatRequest,
+    MemoryDeleteRequest,
+    MemoryItemUpdate,
     ProfilePatch,
     RagPreviewRequest,
     SkillExportRequest,
@@ -85,7 +90,7 @@ def _persist_chat_turn_to_store(
         {"sender": "我", "platform": platform, "ts": now},
         {"sender": "数字分身", "platform": platform, "ts": now},
     ]
-    store.add_messages(texts, metas, source="inside-me")
+    store.add_messages(texts, metas, source="inside-me", dedupe=True)
     prev = load_profile(settings.profile_path)
     fresh = build_profile_from_store(store, previous=prev)
     merged = merge_profile_json(prev, fresh) if prev else fresh
@@ -128,6 +133,9 @@ def _build_chat_api_messages(
             "\n【对话模式：深度访谈】以心理访谈式的节奏回应：先简短反映对方感受或要点，再用一两句澄清式提问，"
             "帮助对方把价值观、恐惧、渴望说得更具体；每次最多两个问句；不做诊断、不替代专业心理咨询。\n"
         )
+    extra = (body.extra_system or "").strip()
+    if extra:
+        system += "\n\n【用户自定义系统补充】\n" + extra[:8000]
 
     msgs: list[dict[str, str]] = [{"role": "system", "content": system}]
     for m in body.messages:
@@ -141,8 +149,22 @@ def _store_dep(s: Annotated[Settings, Depends(get_settings)]) -> MessageStore:
 
 
 @router.get("/health")
-def health() -> dict[str, str]:
-    return {"status": "ok"}
+def health(
+    store: Annotated[MessageStore, Depends(_store_dep)],
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> dict[str, Any]:
+    free_gb: float | None = None
+    try:
+        usage = shutil.disk_usage(settings.data_dir)
+        free_gb = round(usage.free / (1024**3), 2)
+    except Exception:
+        pass
+    return {
+        "status": "ok",
+        "vectors": store.count(),
+        "data_dir": str(settings.data_dir.resolve()),
+        "disk_free_gb": free_gb,
+    }
 
 
 @router.get("/settings", response_model=UserSettings)
@@ -239,11 +261,29 @@ def patch_profile(
     return p
 
 
+@router.post("/import/preview")
+async def import_preview(file: UploadFile = File(...)) -> dict[str, Any]:
+    raw = (await file.read()).decode("utf-8", errors="replace")
+    path = Path(file.filename or "upload.txt")
+    messages, platform = parse_chat_file(path, raw)
+    preview = [
+        {
+            "text": (m.text[:500] + "…") if len(m.text) > 500 else m.text,
+            "sender": m.sender,
+            "ts": m.ts.isoformat() if m.ts else "",
+            "platform": m.platform,
+        }
+        for m in messages[:40]
+    ]
+    return {"platform": platform, "total_parsed": len(messages), "preview": preview}
+
+
 @router.post("/import")
 async def import_chat(
     store: Annotated[MessageStore, Depends(_store_dep)],
     settings: Annotated[Settings, Depends(get_settings)],
     file: UploadFile = File(...),
+    dedupe: bool = Query(True, description="跳过与库内内容哈希重复的消息"),
 ) -> dict:
     raw = (await file.read()).decode("utf-8", errors="replace")
     path = Path(file.filename or "upload.txt")
@@ -251,7 +291,7 @@ async def import_chat(
     if not messages:
         raise HTTPException(
             400,
-            "未能解析出消息，请检查格式（QQ / 微信 / 微博时间块 / 通用逐行）",
+            "未能解析出消息，请检查格式（QQ / 微信 / 微博 / Telegram JSON / Discord CSV / 通用逐行等）",
         )
 
     texts: list[str] = []
@@ -265,13 +305,89 @@ async def import_chat(
                 "ts": m.ts.isoformat() if m.ts else "",
             }
         )
-    n = store.add_messages(texts, metas, source=platform)
+    added, skipped = store.add_messages(texts, metas, source=platform, dedupe=dedupe)
     prev = load_profile(settings.profile_path)
     fresh = build_profile_from_store(store, previous=prev)
     merged = merge_profile_json(prev, fresh) if prev else fresh
     merged.updated_at = datetime.now(timezone.utc).isoformat()
     save_profile(settings.profile_path, merged)
-    return {"imported": n, "platform": platform, "parsed_messages": len(messages)}
+    return {
+        "imported": added,
+        "skipped_duplicates": skipped,
+        "platform": platform,
+        "parsed_messages": len(messages),
+    }
+
+
+@router.get("/memory/browse")
+def memory_browse(
+    store: Annotated[MessageStore, Depends(_store_dep)],
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    platform: str | None = Query(None),
+    q: str | None = Query(None, max_length=500),
+) -> dict[str, Any]:
+    rows = store.browse_memory(limit=limit, offset=offset, platform=platform, q=q)
+    return {"items": _serialize_rag_hits(rows)}
+
+
+@router.post("/memory/delete")
+def memory_delete(
+    body: MemoryDeleteRequest,
+    store: Annotated[MessageStore, Depends(_store_dep)],
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> dict[str, int]:
+    n = store.delete_by_ids(body.ids)
+    prev = load_profile(settings.profile_path)
+    fresh = build_profile_from_store(store, previous=prev)
+    merged = merge_profile_json(prev, fresh) if prev else fresh
+    merged.updated_at = datetime.now(timezone.utc).isoformat()
+    save_profile(settings.profile_path, merged)
+    return {"deleted": n}
+
+
+@router.patch("/memory/item")
+def memory_item_patch(
+    body: MemoryItemUpdate,
+    store: Annotated[MessageStore, Depends(_store_dep)],
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> dict[str, bool]:
+    ok = store.update_message(
+        body.id,
+        document=body.document,
+        sender=body.sender,
+        platform=body.platform,
+        ts=body.ts,
+    )
+    if not ok:
+        raise HTTPException(404, "未找到该条记忆或更新失败")
+    prev = load_profile(settings.profile_path)
+    fresh = build_profile_from_store(store, previous=prev)
+    merged = merge_profile_json(prev, fresh) if prev else fresh
+    merged.updated_at = datetime.now(timezone.utc).isoformat()
+    save_profile(settings.profile_path, merged)
+    return {"ok": True}
+
+
+@router.get("/backup/download")
+def backup_download(settings: Annotated[Settings, Depends(get_settings)]) -> StreamingResponse:
+    root = settings.data_dir.resolve()
+    if not root.is_dir():
+        raise HTTPException(404, "数据目录不存在")
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for p in root.rglob("*"):
+            if p.is_file():
+                try:
+                    zf.write(p, p.relative_to(root))
+                except Exception:
+                    logger.warning("skip backup path %s", p)
+    buf.seek(0)
+    return StreamingResponse(
+        iter([buf.getvalue()]),
+        media_type="application/zip",
+        headers={"Content-Disposition": 'attachment; filename="inside-me-backup.zip"'},
+    )
 
 
 class SummarizeResult(BaseModel):

@@ -83,9 +83,10 @@ def build_skill_markdown(skill_name: str, profile: ProfileState, llm_blocks: dic
 
 ## 增量维护
 
-用户持续导入聊天记录或对话后，应重新导出 skill 以更新本文件；或编辑 `references/MEMORY.md` 记录新的稳定结论。
+用户持续导入聊天记录或对话后，应重新导出 skill 以更新本文件；
+或编辑 `references/MEMORY.md` 记录新的稳定结论。
 
-详见 [references/MEMORY.md](references/MEMORY.md)。
+详见 `references/MEMORY.md` 与 `references/NEXT_STEPS.md`。
 """
     return _yaml_frontmatter(meta) + "\n" + body
 
@@ -115,4 +116,14 @@ def export_skill_dir(
         f"- top_terms: {profile.top_terms}\n"
     )
     (refs / "MEMORY.md").write_text(memory, encoding="utf-8")
+    next_steps = (
+        "# 下一步维护\n\n"
+        "- 在 Inside-ME 中继续导入聊天记录或对话写入记忆后，重新导出本 skill，"
+        "以同步 `SKILL.md` 中的统计与摘要。\n"
+        "- 可编辑本文件或 `MEMORY.md`，手写补充长期稳定的自我结论"
+        "（模型不会自动覆盖此处全文）。\n"
+        "- 若使用可选的 API Token（`INSIDE_ME_API_BEARER_TOKEN`）保护后端，"
+        "导出与备份前请在浏览器「模型设置」填写同一 Token。\n"
+    )
+    (refs / "NEXT_STEPS.md").write_text(next_steps, encoding="utf-8")
     return root

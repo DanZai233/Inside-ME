@@ -215,6 +215,7 @@ uvicorn inside_me.app:app --host 0.0.0.0 --port 8000
 | **`INSIDE_ME_DATA_DIR`** | 数据根目录（默认 `~/.inside-me`） |
 | **`INSIDE_ME_STATIC_DIR`** | 指向前端 `dist` 时，**同一端口**托管静态站 + `/api` |
 | **`INSIDE_ME_CORS_ORIGINS`** | 逗号分隔的浏览器来源 |
+| **`INSIDE_ME_API_BEARER_TOKEN`** | 非空时，除 `/api/health` 外所有 `/api/*` 需 `Authorization: Bearer <token>`；前端「模型设置」可填同一令牌 |
 
 更多见 `src/inside_me/config.py`。
 
@@ -232,6 +233,7 @@ docker compose up -d --build
 浏览器打开 **http://localhost:8080**。
 
 - **持久化**：卷 **`inside_me_data`** → **`/data`**；可改为 `- ./inside-me-data:/data`。
+- **健康检查**：容器内请求 **`/api/health`**（含向量条数、磁盘余量等；**不设** Bearer 时可用）。
 - **改端口**：修改 `ports` 与 **`INSIDE_ME_CORS_ORIGINS`**。
 - **仅构建镜像**：`docker build -t inside-me .`
 
@@ -259,7 +261,7 @@ docker run -d --name inside-me -p 8080:8000 -v inside_me_data:/data inside-me:lo
 ## 仓库结构
 
 - `README.md` / **`README_EN.md`**：中文主文档与英文版
-- `src/inside_me/`：解析、Chroma、画像、Skill、FastAPI、`POST /api/chat` 与 **`POST /api/chat/stream`**
+- `src/inside_me/`：解析、Chroma、画像、Skill、FastAPI、`POST /api/chat` 与 **`POST /api/chat/stream`**；记忆库 **`GET /api/memory/browse`**（关键词不区分大小写）、**`PATCH /api/memory/item`**（编辑正文/元数据并重嵌向量）、**`POST /api/memory/delete`**
 - `frontend/`：React + Vite（记忆档案、流式、仪表盘）
 - `Dockerfile`、`docker-compose.yml`
 - `scripts/`：本地开发脚本

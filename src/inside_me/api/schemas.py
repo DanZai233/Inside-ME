@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class UserSettings(BaseModel):
@@ -29,6 +29,8 @@ class ChatRequest(BaseModel):
     pinned_context: str | None = Field(default=None, max_length=32000)
     # 将本轮用户句与助手完整回复写入本地向量库，与导入聊天记录同源，供后续 RAG
     persist_to_memory: bool = True
+    # 追加到系统提示末尾（人设 / 灵魂问答补充）
+    extra_system: str | None = Field(default=None, max_length=8000)
 
 
 class RagPreviewRequest(BaseModel):
@@ -50,3 +52,26 @@ class ProfilePatch(BaseModel):
 
 class SummarizeRequest(BaseModel):
     use_llm: bool = True
+
+
+class MemoryDeleteRequest(BaseModel):
+    ids: list[str] = Field(..., min_length=1, max_length=200)
+
+
+class MemoryItemUpdate(BaseModel):
+    """更新单条向量记忆：至少改一项；正文变更会触发重新嵌入。"""
+
+    id: str = Field(..., min_length=1, max_length=512)
+    document: str | None = Field(default=None, max_length=120_000)
+    sender: str | None = Field(default=None, max_length=500)
+    platform: str | None = Field(default=None, max_length=128)
+    ts: str | None = Field(default=None, max_length=120)
+
+    @model_validator(mode="after")
+    def at_least_one_field(self) -> MemoryItemUpdate:
+        if all(
+            x is None
+            for x in (self.document, self.sender, self.platform, self.ts)
+        ):
+            raise ValueError("至少需要提供 document / sender / platform / ts 中的一项")
+        return self

@@ -5,6 +5,8 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from starlette.requests import Request
+from starlette.responses import JSONResponse
 
 from inside_me.api.routes import router
 from inside_me.config import get_settings
@@ -31,6 +33,21 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    @application.middleware("http")
+    async def api_bearer_guard(request: Request, call_next):
+        path = request.url.path
+        if not path.startswith("/api"):
+            return await call_next(request)
+        if path == "/api/health":
+            return await call_next(request)
+        tok = (get_settings().api_bearer_token or "").strip()
+        if tok:
+            auth = request.headers.get("authorization", "")
+            if auth != f"Bearer {tok}":
+                return JSONResponse({"detail": "Unauthorized"}, status_code=401)
+        return await call_next(request)
+
     application.include_router(router)
     static = s.static_dir
     if static is not None:

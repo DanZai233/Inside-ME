@@ -9,20 +9,27 @@ import {
 } from "recharts";
 import "./App.css";
 import {
+  type ApiHealth,
   type ChatMessage,
   type DashboardResponse,
+  type ImportPreviewResult,
   type RagHit,
   type UserSettings,
   chatStream,
   exportSkill,
   fetchRagPreview,
+  getApiHealth,
   getDashboard,
   getSettings,
+  getUiApiBearer,
   importFile,
+  importPreview,
   patchProfile,
   saveSettings,
+  setUiApiBearer,
   summarizeProfile,
 } from "./api";
+import { MemoryAdmin } from "./MemoryAdmin";
 import { MemoryVault } from "./MemoryVault";
 
 /** 新建对话时预置在输入框的开场说明，可直接发送或改写成你自己的话。 */
@@ -33,11 +40,67 @@ const DEFAULT_CHAT_OPENER = `你好。我想和「过往与当下的自己」认
 今天我最想先聊的是：
 `;
 
-type Tab = "dashboard" | "import" | "chat" | "settings" | "skill";
+type ChatSessionV = {
+  id: string;
+  title: string;
+  messages: ChatMessage[];
+  extraSystem: string;
+  updatedAt: number;
+};
+
+const CHAT_STORE_KEY = "inside-me-chat-v1";
+
+function readChatStore(): { activeId: string; sessions: ChatSessionV[] } {
+  try {
+    const raw = localStorage.getItem(CHAT_STORE_KEY);
+    if (raw) {
+      const j = JSON.parse(raw) as { activeId: string; sessions: ChatSessionV[] };
+      if (Array.isArray(j.sessions) && j.sessions.length > 0 && j.activeId) return j;
+    }
+  } catch {
+    /* ignore */
+  }
+  const id = crypto.randomUUID();
+  const s: ChatSessionV = {
+    id,
+    title: "默认会话",
+    messages: [],
+    extraSystem: "",
+    updatedAt: Date.now(),
+  };
+  return { activeId: id, sessions: [s] };
+}
+
+type Tab = "dashboard" | "import" | "memory" | "chat" | "settings" | "skill";
+
+type BookmarkEntry = { id: string; role: string; content: string; createdAt: number };
+
+const BOOKMARKS_KEY = "inside-me-bookmarks-v1";
+
+function loadBookmarks(): BookmarkEntry[] {
+  try {
+    const raw = localStorage.getItem(BOOKMARKS_KEY);
+    if (!raw) return [];
+    const j = JSON.parse(raw) as BookmarkEntry[];
+    return Array.isArray(j) ? j : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveBookmarks(rows: BookmarkEntry[]) {
+  localStorage.setItem(BOOKMARKS_KEY, JSON.stringify(rows));
+}
+
+const THEME_KEY = "inside-me-theme";
 
 export default function App() {
+  const boot = readChatStore();
+  const bootActive = boot.sessions.find((s) => s.id === boot.activeId) ?? boot.sessions[0];
+
   const [tab, setTab] = useState<Tab>("dashboard");
   const [dash, setDash] = useState<DashboardResponse | null>(null);
+  const [apiHealth, setApiHealth] = useState<ApiHealth | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [settings, setSettings] = useState<UserSettings>({
     api_base_url: "https://api.openai.com",
@@ -47,7 +110,10 @@ export default function App() {
     embedding_model: "",
     embedding_ark_multimodal: false,
   });
-  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
+  const [sessions, setSessions] = useState<ChatSessionV[]>(() => boot.sessions);
+  const [activeSessionId, setActiveSessionId] = useState(() => boot.activeId);
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>(() => bootActive.messages);
+  const [extraSystem, setExtraSystem] = useState(() => bootActive.extraSystem);
   const [input, setInput] = useState(DEFAULT_CHAT_OPENER);
   const [rag, setRag] = useState(true);
   const [chatMode, setChatMode] = useState<"default" | "interview">("default");
@@ -59,6 +125,8 @@ export default function App() {
   const [pinnedMemory, setPinnedMemory] = useState<RagHit | null>(null);
   const ragPreviewSeq = useRef(0);
   const chatLogRef = useRef<HTMLDivElement>(null);
+  const streamAbortRef = useRef<AbortController | null>(null);
+  const pendingImportFileRef = useRef<File | null>(null);
   const [busy, setBusy] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
   const [skillName, setSkillName] = useState("my-inside-me");
@@ -67,6 +135,20 @@ export default function App() {
     persona_summary: "",
     values_notes: "",
     fear_desire_notes: "",
+  });
+  const [importDedupe, setImportDedupe] = useState(true);
+  const [importPreviewData, setImportPreviewData] = useState<ImportPreviewResult | null>(null);
+  const [bookmarks, setBookmarks] = useState<BookmarkEntry[]>(() => loadBookmarks());
+  const [citationsOpen, setCitationsOpen] = useState(true);
+  const [uiApiBearer, setUiApiBearerState] = useState(() => getUiApiBearer());
+  const [theme, setTheme] = useState<"dark" | "light">(() => {
+    try {
+      const t = localStorage.getItem(THEME_KEY);
+      if (t === "light" || t === "dark") return t;
+    } catch {
+      /* ignore */
+    }
+    return "dark";
   });
 
   const refresh = useCallback(async () => {
@@ -83,6 +165,11 @@ export default function App() {
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
     }
+    try {
+      setApiHealth(await getApiHealth());
+    } catch {
+      setApiHealth(null);
+    }
   }, []);
 
   useEffect(() => {
@@ -98,6 +185,51 @@ export default function App() {
         /* ignore */
       }
     })();
+  }, []);
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    try {
+      localStorage.setItem(THEME_KEY, theme);
+    } catch {
+      /* ignore */
+    }
+  }, [theme]);
+
+  useEffect(() => {
+    const t = window.setTimeout(() => {
+      setSessions((prev) => {
+        const next = prev.map((s) =>
+          s.id === activeSessionId ? { ...s, messages: chatMessages, extraSystem, updatedAt: Date.now() } : s,
+        );
+        try {
+          localStorage.setItem(CHAT_STORE_KEY, JSON.stringify({ activeId: activeSessionId, sessions: next }));
+        } catch {
+          /* ignore */
+        }
+        return next;
+      });
+    }, 500);
+    return () => clearTimeout(t);
+  }, [chatMessages, extraSystem, activeSessionId]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(CHAT_STORE_KEY, JSON.stringify({ activeId: activeSessionId, sessions }));
+    } catch {
+      /* ignore */
+    }
+  }, [sessions, activeSessionId]);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && streamAbortRef.current) {
+        streamAbortRef.current.abort();
+        streamAbortRef.current = null;
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
   }, []);
 
   useEffect(() => {
@@ -154,6 +286,87 @@ export default function App() {
     );
   }, [chatMessages]);
 
+  const switchSession = (id: string) => {
+    if (id === activeSessionId) return;
+    const patched = sessions.map((s) =>
+      s.id === activeSessionId ? { ...s, messages: chatMessages, extraSystem, updatedAt: Date.now() } : s,
+    );
+    const tgt = patched.find((s) => s.id === id);
+    if (!tgt) return;
+    setSessions(patched);
+    setActiveSessionId(id);
+    setChatMessages(tgt.messages);
+    setExtraSystem(tgt.extraSystem);
+    setInjectedHits([]);
+    setPreviewHits([]);
+    setPinnedMemory(null);
+    try {
+      localStorage.setItem(CHAT_STORE_KEY, JSON.stringify({ activeId: id, sessions: patched }));
+    } catch {
+      /* ignore */
+    }
+  };
+
+  const newSession = () => {
+    const patched = sessions.map((s) =>
+      s.id === activeSessionId ? { ...s, messages: chatMessages, extraSystem, updatedAt: Date.now() } : s,
+    );
+    const nid = crypto.randomUUID();
+    const neu: ChatSessionV = {
+      id: nid,
+      title: `会话 ${patched.length + 1}`,
+      messages: [],
+      extraSystem: "",
+      updatedAt: Date.now(),
+    };
+    const next = [...patched, neu];
+    setSessions(next);
+    setActiveSessionId(nid);
+    setChatMessages([]);
+    setExtraSystem("");
+    setInput(DEFAULT_CHAT_OPENER);
+    setInjectedHits([]);
+    setPreviewHits([]);
+    setPinnedMemory(null);
+    try {
+      localStorage.setItem(CHAT_STORE_KEY, JSON.stringify({ activeId: nid, sessions: next }));
+    } catch {
+      /* ignore */
+    }
+  };
+
+  const stopStream = () => {
+    streamAbortRef.current?.abort();
+    streamAbortRef.current = null;
+    setVaultStreaming(false);
+    setBusy(false);
+  };
+
+  const speakText = (text: string) => {
+    const t = text.trim();
+    if (!t || typeof window.speechSynthesis === "undefined") {
+      setToast("当前环境不支持朗读");
+      return;
+    }
+    window.speechSynthesis.cancel();
+    const u = new SpeechSynthesisUtterance(t);
+    u.lang = "zh-CN";
+    window.speechSynthesis.speak(u);
+  };
+
+  const toggleBookmark = (role: string, content: string) => {
+    const snippet = content.slice(0, 4000);
+    setBookmarks((prev) => {
+      const exists = prev.some((b) => b.role === role && b.content === snippet);
+      let next: BookmarkEntry[];
+      if (exists) next = prev.filter((b) => !(b.role === role && b.content === snippet));
+      else next = [...prev, { id: crypto.randomUUID(), role, content: snippet, createdAt: Date.now() }];
+      saveBookmarks(next);
+      setToast(exists ? "已取消书签" : "已加入书签");
+      return next;
+    });
+  };
+
   const platformData = useMemo(() => {
     const p = dash?.profile.platforms ?? {};
     return Object.entries(p).map(([name, value]) => ({ name, value }));
@@ -202,6 +415,9 @@ export default function App() {
   const sendChat = async () => {
     const t = input.trim();
     if (!t) return;
+    streamAbortRef.current?.abort();
+    const ac = new AbortController();
+    streamAbortRef.current = ac;
     setBusy(true);
     setErr(null);
     const next: ChatMessage[] = [...chatMessages, { role: "user", content: t }];
@@ -232,10 +448,16 @@ export default function App() {
         },
         onDone: () => {
           setVaultStreaming(false);
+          streamAbortRef.current = null;
         },
         onError: (msg) => {
           setVaultStreaming(false);
-          setErr(msg);
+          streamAbortRef.current = null;
+          if (msg === "已停止生成") {
+            setToast("已停止生成");
+          } else {
+            setErr(msg);
+          }
           setChatMessages((prev) => {
             const copy = [...prev];
             const cur = copy[assistantIndex];
@@ -245,10 +467,14 @@ export default function App() {
             return copy;
           });
         },
-      },
-      persistChatToMemory);
+      }, {
+        persistToMemory: persistChatToMemory,
+        extraSystem: extraSystem.trim() || null,
+        signal: ac.signal,
+      });
     } catch (e) {
       setVaultStreaming(false);
+      streamAbortRef.current = null;
       setErr(e instanceof Error ? e.message : String(e));
       setChatMessages((prev) => {
         const copy = [...prev];
@@ -275,7 +501,17 @@ export default function App() {
   return (
     <div className={`layout${tab === "chat" ? " layout--wide" : ""}`}>
       <header className="hero">
-        <h1>中之我</h1>
+        <div className="hero__top">
+          <h1>中之我</h1>
+          <button
+            type="button"
+            className="ghost theme-toggle"
+            title="切换浅色 / 深色"
+            onClick={() => setTheme((x) => (x === "dark" ? "light" : "dark"))}
+          >
+            {theme === "dark" ? "浅色" : "深色"}
+          </button>
+        </div>
         <p>
           在本地解析聊天记录、构建向量记忆与画像，并通过对话深化自我觉察；最终导出符合{" "}
           <a href="https://agentskills.io/specification" target="_blank" rel="noreferrer">
@@ -290,6 +526,7 @@ export default function App() {
           [
             ["dashboard", "仪表盘"],
             ["import", "导入"],
+            ["memory", "记忆库"],
             ["chat", "对话"],
             ["skill", "导出 Skill"],
             ["settings", "模型设置"],
@@ -331,7 +568,24 @@ export default function App() {
               <strong>{new Date(dash.profile.updated_at).toLocaleString()}</strong>
               <span>画像更新时间</span>
             </div>
+            {apiHealth?.vectors != null ? (
+              <div className="stat">
+                <strong>{apiHealth.vectors}</strong>
+                <span>/api/health 向量计数</span>
+              </div>
+            ) : null}
+            {apiHealth?.disk_free_gb != null ? (
+              <div className="stat">
+                <strong>{apiHealth.disk_free_gb}</strong>
+                <span>数据盘剩余 (GB)</span>
+              </div>
+            ) : null}
           </div>
+          {apiHealth?.data_dir ? (
+            <p className="health-path" title={apiHealth.data_dir}>
+              数据目录：<code>{apiHealth.data_dir}</code>
+            </p>
+          ) : null}
 
           <div className="panel">
             <h2>平台分布</h2>
@@ -457,28 +711,91 @@ export default function App() {
         <div className="panel">
           <h2>上传聊天记录</h2>
           <p style={{ color: "var(--muted)", fontSize: "0.9rem", marginTop: 0 }}>
-            支持 QQ TXT（含 QQ 号/邮箱标记的多行块）、微信风格 TXT（时间行 + 昵称 + 多行正文）、微博类（仅一行时间、下接多行正文，且文件中至少两条时间行）、或通用逐行（可选{" "}
-            <code>[2024-01-01 12:00:00]</code> 与 <code>发送者:</code> 前缀）。
+            支持 QQ TXT、微信风格 TXT、微博时间块、Telegram JSON、Discord/类 CSV、通用逐行等。可先预览再导入；默认按内容哈希去重。
           </p>
+          <label className="chat-opt" style={{ marginBottom: "0.75rem" }}>
+            <input type="checkbox" checked={importDedupe} onChange={(e) => setImportDedupe(e.target.checked)} />
+            <span>导入时跳过与库内完全重复的句子</span>
+          </label>
           <input
             type="file"
             onChange={async (e) => {
               const f = e.target.files?.[0];
               if (!f) return;
+              pendingImportFileRef.current = f;
               setBusy(true);
               setErr(null);
+              setImportPreviewData(null);
               try {
-                const r = await importFile(f);
-                setToast(`已导入 ${r.imported} 条（解析器：${r.platform}）`);
-                await refresh();
+                const prev = await importPreview(f);
+                setImportPreviewData(prev);
               } catch (ex) {
                 setErr(ex instanceof Error ? ex.message : String(ex));
+                pendingImportFileRef.current = null;
               } finally {
                 setBusy(false);
               }
             }}
           />
+          {importPreviewData ? (
+            <div className="import-preview">
+              <p className="import-preview__meta">
+                解析器：<strong>{importPreviewData.platform}</strong>，共{" "}
+                <strong>{importPreviewData.total_parsed}</strong> 条；以下为前 {importPreviewData.preview.length}{" "}
+                条摘要。
+              </p>
+              <ul className="import-preview__list">
+                {importPreviewData.preview.map((row, i) => (
+                  <li key={i}>
+                    <span className="import-preview__tag">{row.platform}</span>
+                    {row.sender ? <span className="import-preview__sender">{row.sender}</span> : null}
+                    <span className="import-preview__text">{row.text}</span>
+                  </li>
+                ))}
+              </ul>
+              <button
+                type="button"
+                className="primary"
+                disabled={busy || !pendingImportFileRef.current}
+                onClick={async () => {
+                  const f = pendingImportFileRef.current;
+                  if (!f) {
+                    setErr("请先选择文件");
+                    return;
+                  }
+                  setBusy(true);
+                  setErr(null);
+                  try {
+                    const r = await importFile(f, importDedupe);
+                    const skip = r.skipped_duplicates ?? 0;
+                    setToast(
+                      skip
+                        ? `新增 ${r.imported} 条、跳过重复 ${skip} 条（${r.platform}）`
+                        : `已导入 ${r.imported} 条（${r.platform}）`,
+                    );
+                    setImportPreviewData(null);
+                    pendingImportFileRef.current = null;
+                    await refresh();
+                  } catch (ex) {
+                    setErr(ex instanceof Error ? ex.message : String(ex));
+                  } finally {
+                    setBusy(false);
+                  }
+                }}
+              >
+                确认导入
+              </button>
+            </div>
+          ) : null}
         </div>
+      )}
+
+      {tab === "memory" && (
+        <MemoryAdmin
+          onChanged={() => void refresh()}
+          onToast={(s) => setToast(s)}
+          onErr={(s) => setErr(s)}
+        />
       )}
 
       {tab === "chat" && (
@@ -496,8 +813,52 @@ export default function App() {
           />
           <div className="chat-main panel chat-main-panel">
             <h2>深度对话</h2>
+            <div className="chat-sessions">
+              <label className="chat-sessions__label">
+                会话
+                <select
+                  className="chat-sessions__select"
+                  value={activeSessionId}
+                  onChange={(e) => switchSession(e.target.value)}
+                >
+                  {sessions.map((s) => (
+                    <option key={s.id} value={s.id}>
+                      {s.title}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="chat-sessions__label chat-sessions__label--grow">
+                标题
+                <input
+                  className="chat-sessions__title-input"
+                  value={sessions.find((s) => s.id === activeSessionId)?.title ?? ""}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    setSessions((prev) =>
+                      prev.map((s) => (s.id === activeSessionId ? { ...s, title: v } : s)),
+                    );
+                  }}
+                  placeholder="给当前会话起名"
+                  maxLength={80}
+                />
+              </label>
+              <button type="button" className="ghost" onClick={newSession}>
+                新建会话
+              </button>
+            </div>
+            <label className="field chat-persona">
+              人设 / 系统补充（附加到系统提示，仅本轮请求）
+              <textarea
+                rows={3}
+                value={extraSystem}
+                onChange={(e) => setExtraSystem(e.target.value)}
+                placeholder="例如：回答时多用短句；或扮演更理性的自己复盘情绪…"
+              />
+            </label>
             <p className="chat-lead">
-              左侧为<strong>记忆档案</strong>：随输入实时预览检索；发送后模型流式回复时抽屉会<strong>逐条点亮</strong>。默认已预置一段开场白，你可直接改发。勾选「写入本地记忆」时，每轮你与助手的完整句子会进入向量库，与导入的聊天记录一起参与后续 RAG。
+              左侧为<strong>记忆档案</strong>：随输入实时预览检索；发送后模型流式回复时抽屉会<strong>逐条点亮</strong>。默认已预置一段开场白，你可直接改发。勾选「写入本地记忆」时，每轮你与助手的完整句子会进入向量库，与导入的聊天记录一起参与后续 RAG。快捷键：<kbd>Esc</kbd>{" "}
+              停止生成；<kbd>⌘</kbd>/<kbd>Ctrl</kbd>+<kbd>Enter</kbd> 发送。
             </p>
             <label className="chat-opt">
               <input type="checkbox" checked={rag} onChange={(e) => setRag(e.target.checked)} />
@@ -519,6 +880,55 @@ export default function App() {
               />
               <span>深度访谈模式（澄清式提问；非专业心理咨询）</span>
             </label>
+            {injectedHits.length > 0 ? (
+              <details
+                className="citations-fold"
+                open={citationsOpen}
+                onToggle={(e) => setCitationsOpen((e.target as HTMLDetailsElement).open)}
+              >
+                <summary>
+                  本轮检索引用（{injectedHits.length} 条）— 模型已内化，无需逐条复述
+                </summary>
+                <ol className="citations-fold__list">
+                  {injectedHits.map((h) => (
+                    <li key={h.id}>
+                      <span className="citations-fold__meta">
+                        {h.platform} {h.sender ? `· ${h.sender}` : ""}
+                      </span>
+                      <span className="citations-fold__txt">{h.preview || h.text.slice(0, 200)}</span>
+                    </li>
+                  ))}
+                </ol>
+              </details>
+            ) : null}
+            {bookmarks.length > 0 ? (
+              <details className="bookmarks-fold">
+                <summary>书签（{bookmarks.length}）</summary>
+                <ul className="bookmarks-fold__list">
+                  {bookmarks.map((b) => (
+                    <li key={b.id}>
+                      <span className="bookmarks-fold__role">{b.role}</span>
+                      <span className="bookmarks-fold__snippet">
+                        {b.content.length > 120 ? `${b.content.slice(0, 120)}…` : b.content}
+                      </span>
+                      <button
+                        type="button"
+                        className="ghost bookmarks-fold__rm"
+                        onClick={() => {
+                          setBookmarks((prev) => {
+                            const next = prev.filter((x) => x.id !== b.id);
+                            saveBookmarks(next);
+                            return next;
+                          });
+                        }}
+                      >
+                        删除
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              </details>
+            ) : null}
             <div ref={chatLogRef} className="chat-log chat-log--framed">
               {chatMessages.length === 0 && (
                 <div className="chat-log-placeholder">在「模型设置」中配置 API Key 后开始对话。</div>
@@ -528,13 +938,23 @@ export default function App() {
                   <div className="bubble__head">
                     <div className="role">{m.role}</div>
                     {m.role === "assistant" && m.content ? (
-                      <button
-                        type="button"
-                        className="bubble-copy"
-                        onClick={() => copyAssistantText(m.content)}
-                      >
-                        复制
-                      </button>
+                      <div className="bubble__actions">
+                        <button type="button" className="bubble-copy" onClick={() => copyAssistantText(m.content)}>
+                          复制
+                        </button>
+                        <button type="button" className="bubble-copy" onClick={() => speakText(m.content)}>
+                          朗读
+                        </button>
+                        <button
+                          type="button"
+                          className="bubble-copy"
+                          onClick={() => toggleBookmark("assistant", m.content)}
+                        >
+                          {bookmarks.some((b) => b.role === "assistant" && b.content === m.content.slice(0, 4000))
+                            ? "取消书签"
+                            : "书签"}
+                        </button>
+                      </div>
                     ) : null}
                   </div>
                   <div className="bubble__body">{m.content}</div>
@@ -547,16 +967,30 @@ export default function App() {
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={(e) => {
+                if ((e.metaKey || e.ctrlKey) && e.key === "Enter" && !e.shiftKey) {
+                  if (e.nativeEvent.isComposing) return;
+                  e.preventDefault();
+                  if (!busy) void sendChat();
+                  return;
+                }
                 if (e.key !== "Enter" || e.shiftKey) return;
                 if (e.nativeEvent.isComposing) return;
                 e.preventDefault();
                 if (!busy) void sendChat();
               }}
-              placeholder="可编辑预置开场白，或自写问题；输入时左侧会预览相关记忆…（Enter 发送，Shift+Enter 换行）"
+              placeholder="可编辑预置开场白，或自写问题；输入时左侧会预览相关记忆…（Enter 发送，Shift+Enter 换行，⌘/Ctrl+Enter 也可发送）"
             />
             <div className="row chat-actions">
               <button type="button" className="primary" disabled={busy} onClick={() => void sendChat()}>
                 发送
+              </button>
+              <button
+                type="button"
+                className="ghost danger-outline"
+                disabled={!busy}
+                onClick={stopStream}
+              >
+                停止生成
               </button>
               <button
                 type="button"
@@ -636,6 +1070,19 @@ export default function App() {
       {tab === "settings" && (
         <div className="panel">
           <h2>OpenAI 兼容 API</h2>
+          <label className="field" style={{ marginBottom: "1rem" }}>
+            后端访问令牌（可选，与环境变量 <code>INSIDE_ME_API_BEARER_TOKEN</code> 一致）
+            <input
+              type="password"
+              autoComplete="off"
+              value={uiApiBearer}
+              onChange={(e) => {
+                setUiApiBearerState(e.target.value);
+                setUiApiBearer(e.target.value);
+              }}
+              placeholder="未设置服务端令牌则留空"
+            />
+          </label>
           <p style={{ color: "var(--muted)", fontSize: "0.9rem", marginTop: 0 }}>
             Key 保存在本机 <code>~/.inside-me/settings.json</code>。留空 API Key 并保存可保留原值。
             火山方舟 Base URL：<code>https://ark.cn-beijing.volces.com/api/v3</code>。

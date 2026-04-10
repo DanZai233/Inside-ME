@@ -32,6 +32,26 @@ body {
   min-height: 100vh;
 }
 
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg: #eef0f4;
+  --panel: #ffffff;
+  --border: #cfd4dc;
+  --text: #1a1d24;
+  --muted: #5c6473;
+  --accent: #0d8f6e;
+  --accent-dim: #3d9a84;
+  --vault-glow: #0077b6;
+  --vault-amber: #c77d00;
+  --vault-magenta: #7c3aed;
+  --danger: #c41e3a;
+}
+
+:root[data-theme="light"] body {
+  background: radial-gradient(1000px 500px at 8% 0%, #dde8f5 0%, transparent 55%),
+    radial-gradient(800px 420px at 100% 0%, #e8e4f7 0%, transparent 50%), var(--bg);
+}
+
 a {
   color: var(--accent);
 }
