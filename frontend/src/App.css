@@ -101,10 +101,16 @@ textarea,
 select {
   font: inherit;
   color: var(--text);
-  background: #0a0b0e;
+  background: var(--surface-inset);
   border: 1px solid var(--border);
   border-radius: 8px;
   padding: 0.5rem 0.65rem;
+}
+
+input::placeholder,
+textarea::placeholder {
+  color: var(--muted);
+  opacity: 0.9;
 }
 
 textarea {
@@ -162,7 +168,7 @@ button.ghost {
   padding: 0.85rem 1rem;
   border-radius: 12px;
   border: 1px solid var(--border);
-  background: #0a0b0e;
+  background: var(--surface-inset);
 }
 
 .stat strong {
@@ -182,7 +188,7 @@ button.ghost {
   border: 1px solid var(--border);
   border-radius: 10px;
   padding: 0.75rem;
-  background: #0a0b0e;
+  background: var(--surface-inset);
   margin-bottom: 0.75rem;
 }
 
@@ -195,12 +201,12 @@ button.ghost {
 }
 
 .bubble.user {
-  background: #1a222e;
+  background: var(--bubble-user-bg);
   margin-left: 2rem;
 }
 
 .bubble.assistant {
-  background: #121820;
+  background: var(--bubble-assistant-bg);
   margin-right: 2rem;
   border-left: 3px solid var(--accent-dim);
 }
@@ -275,7 +281,7 @@ button.ghost {
   flex-wrap: wrap;
   padding: 0.35rem 0.5rem;
   border-radius: 8px;
-  background: #0a0b0e;
+  background: var(--surface-inset);
   border: 1px solid var(--border);
 }
 
@@ -363,9 +369,9 @@ button.ghost {
   padding: 1rem 1rem 0.75rem;
   background: linear-gradient(
       145deg,
-      color-mix(in srgb, var(--vault-magenta) 12%, #0a0c12) 0%,
-      #0a0b10 48%,
-      color-mix(in srgb, var(--vault-glow) 8%, #0a0b10) 100%
+      color-mix(in srgb, var(--vault-magenta) 12%, var(--vault-shell-a)) 0%,
+      var(--vault-shell-mid) 48%,
+      color-mix(in srgb, var(--vault-glow) 8%, var(--vault-shell-mid)) 100%
     ),
     repeating-linear-gradient(
       -8deg,
@@ -378,6 +384,11 @@ button.ghost {
   box-shadow: 0 0 0 1px color-mix(in srgb, var(--vault-magenta) 25%, transparent),
     0 20px 50px -20px rgba(0, 0, 0, 0.65), 0 0 60px -30px color-mix(in srgb, var(--vault-glow) 35%, transparent);
   overflow: visible;
+}
+
+:root[data-theme="light"] .memory-vault {
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--vault-magenta) 18%, transparent),
+    0 16px 40px -18px rgba(15, 23, 42, 0.08), 0 0 48px -24px color-mix(in srgb, var(--vault-glow) 22%, transparent);
 }
 
 .memory-vault__header {
@@ -410,7 +421,7 @@ button.ghost {
   padding: 0.45rem 0.55rem;
   margin-bottom: 0.65rem;
   border-radius: 10px;
-  background: color-mix(in srgb, var(--vault-amber) 18%, #12151c);
+  background: color-mix(in srgb, var(--vault-amber) 18%, var(--vault-pinned-mix));
   border: 1px solid color-mix(in srgb, var(--vault-amber) 45%, var(--border));
   font-size: 0.78rem;
 }
@@ -529,12 +540,12 @@ button.ghost {
 .memory-drawer__tab {
   width: 10px;
   flex-shrink: 0;
-  background: linear-gradient(180deg, var(--border), #1a1e28);
+  background: linear-gradient(180deg, var(--border), var(--drawer-tab-end));
   border-radius: 6px 0 0 6px;
 }
 
 .memory-drawer--hot .memory-drawer__tab {
-  background: linear-gradient(180deg, var(--vault-glow), color-mix(in srgb, var(--vault-magenta) 60%, #1a1e28));
+  background: linear-gradient(180deg, var(--vault-glow), color-mix(in srgb, var(--vault-magenta) 60%, var(--drawer-tab-end)));
   box-shadow: 0 0 12px color-mix(in srgb, var(--vault-glow) 50%, transparent);
 }
 
@@ -551,7 +562,7 @@ button.ghost {
 }
 
 .memory-drawer--stream-wait.memory-drawer--hot .memory-drawer__tab {
-  background: linear-gradient(180deg, #2a3038, #14161c);
+  background: linear-gradient(180deg, var(--border), var(--drawer-stream-wait-tab-to));
   box-shadow: none;
 }
 
@@ -563,7 +574,7 @@ button.ghost {
 }
 
 .memory-drawer--stream-lit.memory-drawer--hot .memory-drawer__tab {
-  background: linear-gradient(180deg, var(--vault-cyan, #5ec8d8), #1a2830);
+  background: linear-gradient(180deg, var(--vault-cyan, #5ec8d8), var(--drawer-stream-tab-end));
 }
 
 .memory-drawer--stream-pulse.memory-drawer--hot {
@@ -589,7 +600,7 @@ button.ghost {
 }
 
 .memory-drawer--ghost .memory-drawer__body {
-  background: #0c0e14;
+  background: var(--drawer-ghost-body);
 }
 
 .memory-drawer--pinned {
@@ -600,7 +611,7 @@ button.ghost {
   flex: 1;
   min-width: 0;
   padding: 0.45rem 0.55rem 0.4rem;
-  background: linear-gradient(135deg, #10131a 0%, #0c0d12 100%);
+  background: linear-gradient(135deg, var(--drawer-body-from) 0%, var(--drawer-body-to) 100%);
   border: 1px solid var(--border);
   border-left: none;
   border-radius: 0 10px 10px 0;
@@ -608,7 +619,7 @@ button.ghost {
 
 .memory-drawer--hot .memory-drawer__body {
   border-color: color-mix(in srgb, var(--vault-glow) 35%, var(--border));
-  background: linear-gradient(135deg, #0f1822 0%, #0c1018 100%);
+  background: linear-gradient(135deg, var(--drawer-body-hot-from) 0%, var(--drawer-body-hot-to) 100%);
 }
 
 .memory-drawer__meta {
@@ -695,10 +706,14 @@ button.ghost {
   overflow: auto;
   padding: 0.65rem 0.75rem;
   border-radius: 12px;
-  background: #0a0c11;
+  background: var(--tooltip-bg);
   border: 1px solid color-mix(in srgb, var(--vault-glow) 40%, var(--border));
   box-shadow: 0 16px 48px rgba(0, 0, 0, 0.55), 0 0 40px color-mix(in srgb, var(--vault-glow) 15%, transparent);
   pointer-events: auto;
+}
+
+:root[data-theme="light"] .memory-tooltip {
+  box-shadow: 0 12px 36px rgba(15, 23, 42, 0.12), 0 0 28px color-mix(in srgb, var(--vault-glow) 18%, transparent);
 }
 
 .memory-tooltip__meta {
@@ -754,7 +769,7 @@ button.ghost {
   padding: 0.35rem 0.6rem;
   border-radius: 8px;
   border: 1px solid var(--border);
-  background: var(--panel);
+  background: var(--surface-inset);
   color: var(--text);
   min-width: 12rem;
 }
@@ -769,7 +784,7 @@ button.ghost {
   padding: 0.35rem 0.6rem;
   border-radius: 8px;
   border: 1px solid var(--border);
-  background: var(--panel);
+  background: var(--surface-inset);
   color: var(--text);
   width: 100%;
   max-width: 20rem;
@@ -1010,7 +1025,7 @@ button.ghost {
   padding: 0.5rem 0.6rem;
   border-radius: 8px;
   border: 1px solid var(--border);
-  background: var(--panel);
+  background: var(--surface-inset);
   color: var(--text);
   resize: vertical;
 }
@@ -1036,7 +1051,7 @@ button.ghost {
   padding: 0.35rem 0.5rem;
   border-radius: 8px;
   border: 1px solid var(--border);
-  background: var(--panel);
+  background: var(--surface-inset);
   color: var(--text);
 }
 
@@ -1080,7 +1095,7 @@ button.ghost {
   padding: 0.35rem 0.6rem;
   border-radius: 8px;
   border: 1px solid var(--border);
-  background: var(--panel);
+  background: var(--surface-inset);
   color: var(--text);
   max-width: 100%;
 }

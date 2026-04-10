@@ -624,6 +624,15 @@ export default function App() {
     setInput((prev) => (prev.trim() ? `${prev.trim()}\n\n${block}` : block));
   };
 
+  const chartAxis = theme === "light" ? "#5c6473" : "#8b919d";
+  const chartTooltipStyle =
+    theme === "light"
+      ? { background: "#ffffff", border: "1px solid #cfd4dc" }
+      : { background: "#14161c", border: "1px solid #2a2e38" };
+  const chartTooltipLabel = theme === "light" ? "#1a1d24" : "#e8eaef";
+  const chartBarPlatform = theme === "light" ? "#0d8f6e" : "#7ee0c7";
+  const chartBarSender = theme === "light" ? "#5b7fd4" : "#9db4ff";
+
   return (
     <div className={`layout${tab === "chat" ? " layout--wide" : ""}`}>
       <header className="hero">
@@ -718,13 +727,10 @@ export default function App() {
             <div style={{ width: "100%", height: 240 }}>
               <ResponsiveContainer>
                 <BarChart data={platformData}>
-                  <XAxis dataKey="name" stroke="#8b919d" tick={{ fill: "#8b919d", fontSize: 12 }} />
-                  <YAxis stroke="#8b919d" tick={{ fill: "#8b919d", fontSize: 12 }} />
-                  <Tooltip
-                    contentStyle={{ background: "#14161c", border: "1px solid #2a2e38" }}
-                    labelStyle={{ color: "#e8eaef" }}
-                  />
-                  <Bar dataKey="value" fill="#7ee0c7" radius={[6, 6, 0, 0]} />
+                  <XAxis dataKey="name" stroke={chartAxis} tick={{ fill: chartAxis, fontSize: 12 }} />
+                  <YAxis stroke={chartAxis} tick={{ fill: chartAxis, fontSize: 12 }} />
+                  <Tooltip contentStyle={chartTooltipStyle} labelStyle={{ color: chartTooltipLabel }} />
+                  <Bar dataKey="value" fill={chartBarPlatform} radius={[6, 6, 0, 0]} />
                 </BarChart>
               </ResponsiveContainer>
             </div>
@@ -739,20 +745,20 @@ export default function App() {
               <div style={{ width: "100%", height: Math.min(360, 40 + senderData.length * 28) }}>
                 <ResponsiveContainer>
                   <BarChart data={senderData} layout="vertical" margin={{ left: 8, right: 16 }}>
-                    <XAxis type="number" stroke="#8b919d" tick={{ fill: "#8b919d", fontSize: 11 }} />
+                    <XAxis type="number" stroke={chartAxis} tick={{ fill: chartAxis, fontSize: 11 }} />
                     <YAxis
                       type="category"
                       dataKey="name"
                       width={100}
-                      stroke="#8b919d"
-                      tick={{ fill: "#8b919d", fontSize: 11 }}
+                      stroke={chartAxis}
+                      tick={{ fill: chartAxis, fontSize: 11 }}
                     />
                     <Tooltip
-                      contentStyle={{ background: "#14161c", border: "1px solid #2a2e38" }}
-                      labelStyle={{ color: "#e8eaef" }}
+                      contentStyle={chartTooltipStyle}
+                      labelStyle={{ color: chartTooltipLabel }}
                       formatter={(v: number) => [v, "条"]}
                     />
-                    <Bar dataKey="value" fill="#9db4ff" radius={[0, 6, 6, 0]} />
+                    <Bar dataKey="value" fill={chartBarSender} radius={[0, 6, 6, 0]} />
                   </BarChart>
                 </ResponsiveContainer>
               </div>

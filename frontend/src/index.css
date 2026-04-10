@@ -13,6 +13,22 @@
   --danger: #f07178;
   --font-display: "Fraunces", Georgia, serif;
   --font-body: "DM Sans", system-ui, sans-serif;
+  /* Inset wells: inputs, stats, chat log, pair rows */
+  --surface-inset: #0a0b0e;
+  --bubble-user-bg: #1a222e;
+  --bubble-assistant-bg: #121820;
+  --drawer-tab-end: #1a1e28;
+  --drawer-body-from: #10131a;
+  --drawer-body-to: #0c0d12;
+  --drawer-body-hot-from: #0f1822;
+  --drawer-body-hot-to: #0c1018;
+  --drawer-ghost-body: #0c0e14;
+  --drawer-stream-tab-end: #1a2830;
+  --drawer-stream-wait-tab-to: #14161c;
+  --tooltip-bg: #0a0c11;
+  --vault-shell-a: #0a0c12;
+  --vault-shell-mid: #0a0b10;
+  --vault-pinned-mix: #12151c;
 }
 
 * {
@@ -45,6 +61,21 @@ body {
   --vault-amber: #c77d00;
   --vault-magenta: #7c3aed;
   --danger: #c41e3a;
+  --surface-inset: #e4e9f2;
+  --bubble-user-bg: #d4e4f5;
+  --bubble-assistant-bg: #dce8f6;
+  --drawer-tab-end: #b4becd;
+  --drawer-body-from: #f5f7fb;
+  --drawer-body-to: #e8edf5;
+  --drawer-body-hot-from: #e8f2fc;
+  --drawer-body-hot-to: #ddeaf7;
+  --drawer-ghost-body: #eef2f8;
+  --drawer-stream-tab-end: #b8d4e8;
+  --drawer-stream-wait-tab-to: #d5dbe5;
+  --tooltip-bg: #ffffff;
+  --vault-shell-a: #e2e8f2;
+  --vault-shell-mid: #eef1f7;
+  --vault-pinned-mix: #f2ebe3;
 }
 
 :root[data-theme="light"] body {
