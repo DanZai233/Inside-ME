@@ -8,13 +8,17 @@ from fastapi.staticfiles import StaticFiles
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+from inside_me import metrics as http_metrics
 from inside_me.api.routes import router
 from inside_me.config import get_settings
+from inside_me.logging_config import configure_logging
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    get_settings().data_dir.mkdir(parents=True, exist_ok=True)
+    s = get_settings()
+    configure_logging(json_logs=s.log_json)
+    s.data_dir.mkdir(parents=True, exist_ok=True)
     yield
 
 
@@ -39,7 +43,7 @@ def create_app() -> FastAPI:
         path = request.url.path
         if not path.startswith("/api"):
             return await call_next(request)
-        if path == "/api/health":
+        if path in ("/api/health", "/api/metrics"):
             return await call_next(request)
         tok = (get_settings().api_bearer_token or "").strip()
         if tok:
@@ -47,6 +51,13 @@ def create_app() -> FastAPI:
             if auth != f"Bearer {tok}":
                 return JSONResponse({"detail": "Unauthorized"}, status_code=401)
         return await call_next(request)
+
+    @application.middleware("http")
+    async def count_api_requests(request: Request, call_next):
+        response = await call_next(request)
+        if request.url.path.startswith("/api"):
+            http_metrics.record_http_request(request.url.path, response.status_code)
+        return response
 
     application.include_router(router)
     static = s.static_dir

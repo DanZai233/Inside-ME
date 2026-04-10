@@ -36,6 +36,7 @@ def test_api_bearer_blocks_dashboard(tmp_path, monkeypatch) -> None:
     assert c.get("/api/dashboard").status_code == 401
     r = c.get("/api/dashboard", headers={"Authorization": "Bearer secret"})
     assert r.status_code == 200
+    assert c.get("/api/metrics").status_code == 200
 
 
 def test_import_preview(client) -> None:
@@ -53,6 +54,12 @@ def test_import_preview(client) -> None:
 def test_memory_item_patch_validation(client) -> None:
     r = client.patch("/api/memory/item", json={"id": "any"})
     assert r.status_code == 422
+
+
+def test_api_metrics(client) -> None:
+    r = client.get("/api/metrics")
+    assert r.status_code == 200
+    assert "inside_me" in r.text
 
 
 def test_memory_item_patch_not_found(client) -> None:

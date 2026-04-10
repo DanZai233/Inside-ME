@@ -1,5 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  INTERVIEW_PRESETS,
+  getInterviewPreset,
+  mergeInterviewExtra,
+} from "./interviewPresets";
+import {
   Bar,
   BarChart,
   ResponsiveContainer,
@@ -17,6 +22,7 @@ import {
   type UserSettings,
   chatStream,
   exportSkill,
+  fetchMetricsText,
   fetchRagPreview,
   getApiHealth,
   getDashboard,
@@ -93,6 +99,7 @@ function saveBookmarks(rows: BookmarkEntry[]) {
 }
 
 const THEME_KEY = "inside-me-theme";
+const LS_INTERVIEW_PRESET = "inside-me-interview-preset-id";
 
 export default function App() {
   const boot = readChatStore();
@@ -150,6 +157,15 @@ export default function App() {
     }
     return "dark";
   });
+  const [interviewPresetId, setInterviewPresetId] = useState(() => {
+    try {
+      return localStorage.getItem(LS_INTERVIEW_PRESET) ?? "";
+    } catch {
+      return "";
+    }
+  });
+  const [voiceListening, setVoiceListening] = useState(false);
+  const speechRecRef = useRef<{ stop: () => void; abort?: () => void } | null>(null);
 
   const refresh = useCallback(async () => {
     setErr(null);
@@ -195,6 +211,14 @@ export default function App() {
       /* ignore */
     }
   }, [theme]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(LS_INTERVIEW_PRESET, interviewPresetId);
+    } catch {
+      /* ignore */
+    }
+  }, [interviewPresetId]);
 
   useEffect(() => {
     const t = window.setTimeout(() => {
@@ -380,6 +404,108 @@ export default function App() {
     }));
   }, [dash]);
 
+  const mergedForChat = useMemo(() => {
+    const presetText =
+      chatMode === "interview"
+        ? (getInterviewPreset(interviewPresetId)?.systemAppend ?? "")
+        : "";
+    return mergeInterviewExtra(presetText, extraSystem);
+  }, [chatMode, interviewPresetId, extraSystem]);
+
+  const timelineItems = useMemo(() => {
+    type Tl = { kind: "session" | "bookmark"; id: string; title: string; ts: number };
+    const sess: Tl[] = sessions.map((s) => ({
+      kind: "session",
+      id: s.id,
+      title: s.title || "未命名会话",
+      ts: s.updatedAt,
+    }));
+    const bm: Tl[] = bookmarks.map((b) => ({
+      kind: "bookmark",
+      id: b.id,
+      title: `${b.role}: ${b.content.slice(0, 56)}${b.content.length > 56 ? "…" : ""}`,
+      ts: b.createdAt,
+    }));
+    return [...sess, ...bm].sort((a, b) => b.ts - a.ts).slice(0, 48);
+  }, [sessions, bookmarks]);
+
+  const startVoiceInput = useCallback(() => {
+    type Rec = {
+      lang: string;
+      continuous: boolean;
+      interimResults: boolean;
+      start: () => void;
+      stop: () => void;
+      onresult: ((this: Rec, ev: Event) => void) | null;
+      onerror: ((this: Rec, ev: Event) => void) | null;
+      onend: ((this: Rec, ev: Event) => void) | null;
+    };
+    const W = window as unknown as { SpeechRecognition?: new () => Rec; webkitSpeechRecognition?: new () => Rec };
+    const SR = W.SpeechRecognition || W.webkitSpeechRecognition;
+    if (!SR) {
+      setToast("当前浏览器不支持语音识别");
+      return;
+    }
+    if (voiceListening) {
+      speechRecRef.current?.stop();
+      setVoiceListening(false);
+      return;
+    }
+    const r = new SR();
+    r.lang = "zh-CN";
+    r.continuous = false;
+    r.interimResults = false;
+    r.onresult = (ev) => {
+      const res = (ev as unknown as { results: ArrayLike<{ 0: { transcript: string } }> }).results;
+      const t = (res[0]?.[0]?.transcript ?? "").trim();
+      if (t) setInput((prev) => (prev.trim() ? `${prev.trim()} ${t}` : t));
+      setVoiceListening(false);
+    };
+    r.onerror = () => {
+      setVoiceListening(false);
+      setToast("语音识别中断");
+    };
+    r.onend = () => setVoiceListening(false);
+    speechRecRef.current = r;
+    try {
+      r.start();
+      setVoiceListening(true);
+    } catch {
+      setToast("无法启动麦克风");
+      setVoiceListening(false);
+    }
+  }, [voiceListening]);
+
+  const exportCurrentSession = useCallback(() => {
+    const sess = sessions.find((x) => x.id === activeSessionId);
+    const safe = (sess?.title || "session").replace(/[^\w\u4e00-\u9fff.-]+/gu, "_").slice(0, 48);
+    const meta = {
+      title: sess?.title ?? "",
+      exportedAt: new Date().toISOString(),
+      chatMode,
+      interviewPresetId,
+      extraSystem,
+      messages: chatMessages.filter((m) => m.content.trim()),
+    };
+    const md = [
+      "## 元数据",
+      "```json",
+      JSON.stringify(meta, null, 2),
+      "```",
+      "",
+      "## 消息",
+      ...meta.messages.map((m) => `### ${m.role}\n\n${m.content.trim()}\n`),
+    ].join("\n");
+    const blob = new Blob([md], { type: "text/markdown;charset=utf-8" });
+    const u = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = u;
+    a.download = `inside-me-${safe}.md`;
+    a.click();
+    URL.revokeObjectURL(u);
+    setToast("已导出当前会话为 Markdown");
+  }, [sessions, activeSessionId, chatMode, interviewPresetId, extraSystem, chatMessages]);
+
   const saveNotes = async () => {
     setBusy(true);
     setErr(null);
@@ -469,7 +595,7 @@ export default function App() {
         },
       }, {
         persistToMemory: persistChatToMemory,
-        extraSystem: extraSystem.trim() || null,
+        extraSystem: mergedForChat,
         signal: ac.signal,
       });
     } catch (e) {
@@ -880,6 +1006,37 @@ export default function App() {
               />
               <span>深度访谈模式（澄清式提问；非专业心理咨询）</span>
             </label>
+            {chatMode === "interview" ? (
+              <label className="field chat-preset">
+                访谈剧本（合并进系统提示，可与下方「人设」同发）
+                <select
+                  value={interviewPresetId}
+                  onChange={(e) => setInterviewPresetId(e.target.value)}
+                  aria-label="访谈剧本"
+                >
+                  {INTERVIEW_PRESETS.map((p) => (
+                    <option key={p.id || "none"} value={p.id}>
+                      {p.label}
+                    </option>
+                  ))}
+                </select>
+                <span className="preset-hint">{getInterviewPreset(interviewPresetId)?.hint ?? ""}</span>
+              </label>
+            ) : null}
+            {timelineItems.length > 0 ? (
+              <details className="timeline-fold">
+                <summary>时间线（会话更新与书签，新→旧）</summary>
+                <ul className="timeline-fold__list">
+                  {timelineItems.map((it) => (
+                    <li key={`${it.kind}-${it.id}`}>
+                      <span className="timeline-fold__kind">{it.kind === "session" ? "会话" : "书签"}</span>
+                      <span className="timeline-fold__title">{it.title}</span>
+                      <span className="timeline-fold__ts">{new Date(it.ts).toLocaleString()}</span>
+                    </li>
+                  ))}
+                </ul>
+              </details>
+            ) : null}
             {injectedHits.length > 0 ? (
               <details
                 className="citations-fold"
@@ -1007,6 +1164,22 @@ export default function App() {
                 onClick={() => copyChatAsMarkdown()}
               >
                 复制对话
+              </button>
+              <button
+                type="button"
+                className="ghost"
+                disabled={chatMessages.length === 0}
+                onClick={exportCurrentSession}
+              >
+                导出会话
+              </button>
+              <button
+                type="button"
+                className={`ghost${voiceListening ? " voice-listening" : ""}`}
+                onClick={startVoiceInput}
+                title="使用浏览器语音识别填入输入框（Chrome / Edge 等）"
+              >
+                {voiceListening ? "停止听写" : "语音输入"}
               </button>
               <button
                 type="button"
@@ -1198,6 +1371,32 @@ export default function App() {
           >
             保存
           </button>
+          <div className="settings-ops">
+            <h3 className="settings-sub">运维</h3>
+            <p>
+              结构化日志：启动前设置环境变量 <code>INSIDE_ME_LOG_JSON=1</code>，服务将往 stderr 输出单行 JSON。
+            </p>
+            <p>
+              Prometheus 指标：<code>GET /api/metrics</code>（与 <code>/api/health</code> 相同，默认不要求 Bearer）。
+            </p>
+            <button
+              type="button"
+              className="ghost"
+              disabled={busy}
+              onClick={() => {
+                void fetchMetricsText()
+                  .then((t) => {
+                    void navigator.clipboard.writeText(t).then(
+                      () => setToast("已复制指标文本到剪贴板"),
+                      () => setErr("无法写入剪贴板"),
+                    );
+                  })
+                  .catch((e) => setErr(e instanceof Error ? e.message : String(e)));
+              }}
+            >
+              复制当前指标快照
+            </button>
+          </div>
         </div>
       )}
     </div>

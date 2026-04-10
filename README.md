@@ -215,7 +215,8 @@ uvicorn inside_me.app:app --host 0.0.0.0 --port 8000
 | **`INSIDE_ME_DATA_DIR`** | 数据根目录（默认 `~/.inside-me`） |
 | **`INSIDE_ME_STATIC_DIR`** | 指向前端 `dist` 时，**同一端口**托管静态站 + `/api` |
 | **`INSIDE_ME_CORS_ORIGINS`** | 逗号分隔的浏览器来源 |
-| **`INSIDE_ME_API_BEARER_TOKEN`** | 非空时，除 `/api/health` 外所有 `/api/*` 需 `Authorization: Bearer <token>`；前端「模型设置」可填同一令牌 |
+| **`INSIDE_ME_API_BEARER_TOKEN`** | 非空时，除 `/api/health`、`/api/metrics` 外所有 `/api/*` 需 `Authorization: Bearer <token>`；前端「模型设置」可填同一令牌 |
+| **`INSIDE_ME_LOG_JSON`** | 设为 `1` / `true` 时 stderr 输出单行 JSON 日志，便于采集 |
 
 更多见 `src/inside_me/config.py`。
 
@@ -261,7 +262,7 @@ docker run -d --name inside-me -p 8080:8000 -v inside_me_data:/data inside-me:lo
 ## 仓库结构
 
 - `README.md` / **`README_EN.md`**：中文主文档与英文版
-- `src/inside_me/`：解析、Chroma、画像、Skill、FastAPI、`POST /api/chat` 与 **`POST /api/chat/stream`**；记忆库 **`GET /api/memory/browse`**（关键词不区分大小写）、**`PATCH /api/memory/item`**（编辑正文/元数据并重嵌向量）、**`POST /api/memory/delete`**
+- `src/inside_me/`：解析、Chroma、画像、Skill、FastAPI、`POST /api/chat` 与 **`POST /api/chat/stream`**；记忆库 **`GET /api/memory/browse`**（关键词不区分大小写、可选时间范围）、**`PATCH /api/memory/item`**、**`POST /api/memory/delete`**；运维 **`GET /api/metrics`**（Prometheus 文本）
 - `frontend/`：React + Vite（记忆档案、流式、仪表盘）
 - `Dockerfile`、`docker-compose.yml`
 - `scripts/`：本地开发脚本

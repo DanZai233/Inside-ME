@@ -314,21 +314,38 @@ export async function patchProfile(patch: {
   return r.json();
 }
 
+export type MemoryBrowseResponse = {
+  items: RagHit[];
+  scan_capped?: boolean;
+  total_matching?: number | null;
+};
+
 export async function browseMemory(params: {
   limit?: number;
   offset?: number;
   platform?: string;
   q?: string;
-}): Promise<{ items: RagHit[] }> {
+  ts_from?: string;
+  ts_to?: string;
+}): Promise<MemoryBrowseResponse> {
   const sp = new URLSearchParams();
   if (params.limit != null) sp.set("limit", String(params.limit));
   if (params.offset != null) sp.set("offset", String(params.offset));
   if (params.platform?.trim()) sp.set("platform", params.platform.trim());
   if (params.q?.trim()) sp.set("q", params.q.trim());
+  if (params.ts_from?.trim()) sp.set("ts_from", params.ts_from.trim());
+  if (params.ts_to?.trim()) sp.set("ts_to", params.ts_to.trim());
   const q = sp.toString();
   const r = await fetch(`/api/memory/browse${q ? `?${q}` : ""}`, { headers: authHeaders() });
   if (!r.ok) throw new Error(await parseError(r));
   return r.json();
+}
+
+/** Prometheus 文本（与 /api/health 相同免 Bearer） */
+export async function fetchMetricsText(): Promise<string> {
+  const r = await fetch("/api/metrics");
+  if (!r.ok) throw new Error(await parseError(r));
+  return r.text();
 }
 
 export async function deleteMemoryIds(ids: string[]): Promise<{ deleted: number }> {

@@ -207,7 +207,8 @@ Override root with **`INSIDE_ME_DATA_DIR`**.
 | **`INSIDE_ME_DATA_DIR`** | Data root (default `~/.inside-me`) |
 | **`INSIDE_ME_STATIC_DIR`** | Path to Vite `dist` → static + `/api` on one port |
 | **`INSIDE_ME_CORS_ORIGINS`** | Comma-separated browser origins |
-| **`INSIDE_ME_API_BEARER_TOKEN`** | If set, all `/api/*` except `/api/health` require `Authorization: Bearer <token>`; enter the same token in the web UI **Settings** |
+| **`INSIDE_ME_API_BEARER_TOKEN`** | If set, all `/api/*` except `/api/health` and `/api/metrics` require `Authorization: Bearer <token>`; enter the same token in the web UI **Settings** |
+| **`INSIDE_ME_LOG_JSON`** | Set to `1` / `true` for one-line JSON logs on stderr |
 
 See `src/inside_me/config.py` for more.
 
@@ -252,7 +253,7 @@ docker run -d --name inside-me -p 8080:8000 -v inside_me_data:/data inside-me:lo
 
 ## Repository layout
 
-- `src/inside_me/` — parsers, Chroma, profile, Skill generator, FastAPI, `POST /api/chat`, **`POST /api/chat/stream`**; memory **`GET /api/memory/browse`** (case-insensitive substring), **`PATCH /api/memory/item`** (edit body/metadata, re-embed), **`POST /api/memory/delete`**
+- `src/inside_me/` — parsers, Chroma, profile, Skill generator, FastAPI, `POST /api/chat`, **`POST /api/chat/stream`**; memory **`GET /api/memory/browse`** (case-insensitive substring, optional time range), **`PATCH /api/memory/item`**, **`POST /api/memory/delete`**; ops **`GET /api/metrics`**
 - `frontend/` — React + Vite (vault, streaming, dashboard)
 - `Dockerfile`, `docker-compose.yml`
 - `scripts/` — dev helpers
@@ -261,14 +262,14 @@ docker run -d --name inside-me -p 8080:8000 -v inside_me_data:/data inside-me:lo
 
 ## Roadmap (ideas)
 
-Shipped in recent builds: optional API bearer, `/api/health` details, import preview + dedupe, memory browse/delete, backup zip, Telegram/Discord parsers, stream abort, multi-session drafts, persona (`extra_system`), bookmarks, TTS, citation fold, light theme, Docker health on `/api/health`.
+Shipped in recent builds: optional API bearer, `/api/health` + **`/api/metrics`**, JSON logging env, import preview + dedupe, memory browse (CI substring, time range, highlight) / edit / delete, backup zip, Telegram/Discord parsers, stream abort, multi-session drafts, persona + **interview presets**, **timeline** (sessions + bookmarks), **voice input** + **session export**, bookmarks, TTS, citation fold, light theme.
 
 | Area | Ideas |
 |------|--------|
-| Soul Q&A | Interview script presets; timelines |
-| Memory | Edit rows in place; stronger full-text UX |
-| Chat | Voice input; export single session |
-| Ops / UX | Structured logging; metrics |
+| Soul Q&A | Custom user-defined scripts; calendar heatmaps |
+| Memory | FTS / BM25 beyond substring; server-side total counts without scan cap |
+| Chat | Multi-language STT; session export JSON schema tooling |
+| Ops / UX | Auth-gated metrics; request latency histograms |
 
 ---
 

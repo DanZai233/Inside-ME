@@ -23,10 +23,28 @@ def test_browse_memory_case_insensitive(tmp_path) -> None:
         [{"sender": "u", "platform": "qq_txt", "ts": "2020-01-01"}],
         source="t",
     )
-    low = store.browse_memory(limit=10, q="world")
+    low, m1 = store.browse_memory(limit=10, q="world")
     assert len(low) == 1
-    up = store.browse_memory(limit=10, q="WORLD")
+    assert m1.get("total_matching") is None
+    up, m2 = store.browse_memory(limit=10, q="WORLD")
     assert len(up) == 1
+
+
+def test_browse_memory_ts_range(tmp_path) -> None:
+    s = Settings(data_dir=tmp_path)
+    store = MessageStore(s, UserSettings())
+    store.add_messages(
+        ["early", "late"],
+        [
+            {"sender": "", "platform": "p", "ts": "2024-01-15T12:00:00"},
+            {"sender": "", "platform": "p", "ts": "2024-06-01T12:00:00"},
+        ],
+        "t",
+    )
+    page, meta = store.browse_memory(limit=10, ts_from="2024-01-01", ts_to="2024-03-01")
+    assert len(page) == 1
+    assert page[0]["document"] == "early"
+    assert meta.get("total_matching") == 1
 
 
 def test_update_message_text_and_meta(tmp_path) -> None:
@@ -37,9 +55,11 @@ def test_update_message_text_and_meta(tmp_path) -> None:
         [{"sender": "a", "platform": "p1", "ts": "t1"}],
         source="src",
     )
-    mid = store.browse_memory(limit=1)[0]["id"]
+    rows, _ = store.browse_memory(limit=1)
+    mid = rows[0]["id"]
     assert store.update_message(mid, document="patched", sender="b", platform="p2", ts="t2")
-    row = store.browse_memory(limit=1)[0]
+    rows2, _ = store.browse_memory(limit=1)
+    row = rows2[0]
     assert row["document"] == "patched"
     assert row["metadata"]["sender"] == "b"
     assert row["metadata"]["platform"] == "p2"

@@ -4,10 +4,12 @@ import hashlib
 import logging
 import re
 import uuid
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import chromadb
+from dateutil import parser as date_parser
 from chromadb.utils import embedding_functions
 
 from inside_me.api.schemas import UserSettings
@@ -32,6 +34,37 @@ def _where_document_ci_substring(q: str) -> dict[str, Any] | None:
     if not s:
         return None
     return {"$regex": f"(?i){re.escape(s)}"}
+
+
+_BROWSE_TS_SCAN_CAP = 5000
+
+
+def _parse_ts_bound(raw: str | None, *, end_of_day: bool) -> datetime | None:
+    if not raw or not str(raw).strip():
+        return None
+    s = str(raw).strip()
+    try:
+        dt = date_parser.parse(s)
+    except (ValueError, TypeError, OverflowError):
+        return None
+    date_only = len(s) <= 10 and "T" not in s.upper() and " " not in s
+    if date_only:
+        if end_of_day:
+            return dt.replace(hour=23, minute=59, second=59, microsecond=999999)
+        return dt.replace(hour=0, minute=0, second=0, microsecond=0)
+    return dt
+
+
+def _row_meta_dt(meta: Any) -> datetime | None:
+    if not isinstance(meta, dict):
+        return None
+    ts = str(meta.get("ts") or "").strip()
+    if not ts:
+        return None
+    try:
+        return date_parser.parse(ts)
+    except (ValueError, TypeError, OverflowError):
+        return None
 
 
 class MessageStore:
@@ -161,38 +194,73 @@ class MessageStore:
         offset: int = 0,
         platform: str | None = None,
         q: str | None = None,
-    ) -> list[dict[str, Any]]:
+        ts_from: str | None = None,
+        ts_to: str | None = None,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        """返回 (条目列表, {scan_capped, total_matching})；带时间筛选时在最多拉取 _BROWSE_TS_SCAN_CAP 条内过滤后排序分页。"""
         cap = min(max(limit, 1), 500)
-        kw: dict[str, Any] = {
-            "limit": cap,
-            "offset": max(offset, 0),
-            "include": ["documents", "metadatas"],
-        }
-        if platform and platform.strip():
-            kw["where"] = {"platform": {"$eq": platform.strip()}}
+        off = max(offset, 0)
         qstrip = (q or "").strip()
         wd = _where_document_ci_substring(qstrip) if qstrip else None
+        plat = platform.strip() if platform and platform.strip() else None
+        t0 = _parse_ts_bound(ts_from, end_of_day=False) if ts_from else None
+        t1 = _parse_ts_bound(ts_to, end_of_day=True) if ts_to else None
+        ts_active = t0 is not None or t1 is not None
+
+        kw: dict[str, Any] = {
+            "limit": _BROWSE_TS_SCAN_CAP if ts_active else cap,
+            "offset": 0 if ts_active else off,
+            "include": ["documents", "metadatas"],
+        }
+        if plat:
+            kw["where"] = {"platform": {"$eq": plat}}
         if wd:
             kw["where_document"] = wd
         try:
             raw = self._col.get(**kw)
         except Exception:
             logger.exception("browse_memory get failed")
-            return []
+            return [], {"scan_capped": False, "total_matching": None}
+
         ids = raw.get("ids") or []
         docs = raw.get("documents") or []
         metas = raw.get("metadatas") or []
-        out: list[dict[str, Any]] = []
+        rows: list[dict[str, Any]] = []
         for i in range(len(ids)):
             doc = docs[i] if i < len(docs) else ""
-            out.append(
+            rows.append(
                 {
                     "id": ids[i],
                     "document": doc,
                     "metadata": metas[i] if i < len(metas) else {},
                 }
             )
-        return out
+
+        scan_capped = ts_active and len(ids) >= _BROWSE_TS_SCAN_CAP
+
+        if ts_active:
+            filtered: list[dict[str, Any]] = []
+            for row in rows:
+                dt = _row_meta_dt(row.get("metadata"))
+                if dt is None:
+                    continue
+                if t0 is not None and dt < t0:
+                    continue
+                if t1 is not None and dt > t1:
+                    continue
+                filtered.append(row)
+            filtered.sort(
+                key=lambda r: _row_meta_dt(r.get("metadata")) or datetime.min,
+                reverse=True,
+            )
+            total = len(filtered)
+            page = filtered[off : off + cap]
+            return page, {
+                "scan_capped": scan_capped,
+                "total_matching": total,
+            }
+
+        return rows, {"scan_capped": False, "total_matching": None}
 
     def query(self, text: str, n: int = 8) -> list[dict[str, Any]]:
         if not text.strip():

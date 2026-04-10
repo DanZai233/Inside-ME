@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
-from fastapi.responses import StreamingResponse
+from fastapi.responses import PlainTextResponse, StreamingResponse
 from pydantic import BaseModel
 
 from inside_me.analysis.llm import openai_compatible_chat_stream, summarize_for_skill
@@ -33,6 +33,7 @@ from inside_me.api.schemas import (
     UserSettings,
 )
 from inside_me.config import Settings, get_settings
+from inside_me import metrics as http_metrics
 from inside_me.parsers import parse_chat_file
 from inside_me.prefs import (
     load_user_settings,
@@ -46,6 +47,15 @@ from inside_me.store import MessageStore
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api")
+
+
+@router.get("/metrics")
+def prometheus_metrics() -> PlainTextResponse:
+    """Prometheus 文本指标（与 /api/health 相同，不设 Bearer 时可抓取）。"""
+    return PlainTextResponse(
+        content=http_metrics.prometheus_text(),
+        media_type="text/plain; version=0.0.4; charset=utf-8",
+    )
 
 
 def _serialize_rag_hits(hits: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -326,9 +336,22 @@ def memory_browse(
     offset: int = Query(0, ge=0),
     platform: str | None = Query(None),
     q: str | None = Query(None, max_length=500),
+    ts_from: str | None = Query(None, max_length=80, description="元数据 ts 下限（ISO 或 YYYY-MM-DD）"),
+    ts_to: str | None = Query(None, max_length=80, description="元数据 ts 上限（ISO 或 YYYY-MM-DD，含当日）"),
 ) -> dict[str, Any]:
-    rows = store.browse_memory(limit=limit, offset=offset, platform=platform, q=q)
-    return {"items": _serialize_rag_hits(rows)}
+    rows, meta = store.browse_memory(
+        limit=limit,
+        offset=offset,
+        platform=platform,
+        q=q,
+        ts_from=ts_from,
+        ts_to=ts_to,
+    )
+    return {
+        "items": _serialize_rag_hits(rows),
+        "scan_capped": meta.get("scan_capped", False),
+        "total_matching": meta.get("total_matching"),
+    }
 
 
 @router.post("/memory/delete")
