@@ -11,7 +11,7 @@
 
 License: **MIT** · Python **3.11+** · [Agent Skills](https://agentskills.io/specification) · **本地优先**（可选 OpenAI 兼容 API / 火山方舟） · **Docker 可一键部署**
 
-[安装](#本地安装) · [启动](#启动-api) · [前端](#前端开发) · [数据落盘](#数据存哪儿持久化吗) · [Docker](#docker-一键部署) · [隐私](#隐私说明) · [写在最后](#写在最后)
+[安装](#本地安装) · [启动](#启动-api) · [前端](#前端开发) · [导入 Skill](#导入导出的-skill-到-claude-code--cursor) · [数据落盘](#数据存哪儿持久化吗) · [Docker](#docker-一键部署) · [隐私](#隐私说明) · [写在最后](#写在最后)
 
 ---
 
@@ -40,7 +40,7 @@ License: **MIT** · Python **3.11+** · [Agent Skills](https://agentskills.io/sp
 | **导入** | QQ / 微信风格 / 微博块 / 通用文本 → 向量库；与 [自己.skill](https://github.com/notdog1998/yourself-skill) / [前任.skill](https://github.com/therealXiaomanChu/ex-skill) 推荐的导出格式生态相容思路一致：**先有真材料** |
 | **对话（中之我）** | **流式**回复；左侧 **记忆档案**（输入即预览检索、发送后本轮注入高亮、生成时抽屉**逐条点亮**）——**对话现场可视化**；钉选、插入输入、预置开场白、**深度访谈模式**；Enter 发送 / Shift+Enter 换行；复制单条或整段 Markdown |
 | **写入记忆** | 勾选后，每轮你与助手的完整表述**回到向量库**，与导入记录一起参与今后检索——**真人当下的觉悟，也能喂给未来的中之我**（`persist_to_memory`，默认 `true`） |
-| **导出 Skill** | `exports/<name>/`：`SKILL.md`、`references/MEMORY.md` 等，便于与 Agent Skills 工具链衔接 |
+| **导出 Skill** | 生成符合 [Agent Skills 规范](https://agentskills.io/specification) 的目录：`{name}/SKILL.md`（frontmatter 中 `name` **与文件夹名一致**）+ `references/MEMORY.md`。可用官方工具校验：`skills-ref validate <skill 目录>`（见 [skills-ref](https://github.com/agentskills/agentskills/tree/main/skills-ref)）。**与 [yourself-skill](https://github.com/notdog1998/yourself-skill) 的差异**：对方仓库是带 `prompts/`、`tools/` 的「`/create-yourself` 生成器」Skill；**中之我导出的是已根据你的数据填好的数字分身说明型 Skill**，结构更简，可直接被 Claude Code / Cursor 等加载。 |
 | **模型设置** | 对话与嵌入分离配置；支持方舟等多端点 |
 
 ---
@@ -97,8 +97,60 @@ uvicorn inside_me.app:app --host 127.0.0.1 --port 8000
 
 ```bash
 inside-me import ./exports/chat.txt
+# 导出到目录 ./dist-skills/<skill 名>/（skill 名仅小写、数字、连字符）
 inside-me skill my-inside-me --out ./dist-skills
 ```
+
+---
+
+## 导入导出的 Skill 到 Claude Code / Cursor
+
+下面假设你已经在中之我导出过 Skill（网页 **「导出 Skill」** 成功后会提示路径；默认一般在 **`~/.inside-me/exports/<你填的名字>/`**）。该目录内应有 **`SKILL.md`** 和 **`references/MEMORY.md`**，且文件夹名与 `SKILL.md` 顶部 frontmatter 里的 **`name`** 字段**完全一致**（导出时已自动满足）。
+
+### 0.（可选）用官方工具自检
+
+若已安装 [skills-ref](https://github.com/agentskills/agentskills/tree/main/skills-ref)：
+
+```bash
+skills-ref validate ~/.inside-me/exports/my-inside-me
+```
+
+将路径换成你的实际导出目录。
+
+### 1. Claude Code：放进 `.claude/skills/`
+
+与 [yourself-skill](https://github.com/notdog1998/yourself-skill) 等项目的做法一致：Claude Code 会在 **Git 仓库根目录** 下的 **`.claude/skills/`** 里发现 Skill。
+
+**只对当前项目生效**（推荐）：
+
+```bash
+cd /path/to/你的项目        # 必须是 git 仓库根目录
+mkdir -p .claude/skills
+cp -R ~/.inside-me/exports/my-inside-me .claude/skills/
+# 开发时也可用软链，改导出后无需重复拷贝：
+# ln -sf ~/.inside-me/exports/my-inside-me .claude/skills/my-inside-me
+```
+
+**对所有项目生效**（用户级）：
+
+```bash
+mkdir -p ~/.claude/skills
+cp -R ~/.inside-me/exports/my-inside-me ~/.claude/skills/
+```
+
+然后**重启 Claude Code** 或按当前版本的说明刷新技能列表。在对话里用自然语言说明「请按某某 skill 的人格与记忆来回应」，或使用产品里与 **Agent Skills** 对应的唤起方式（以 Claude Code 当期 UI 为准）。
+
+### 2. Cursor 与其它编辑器
+
+不同版本对 [Agent Skills](https://agentskills.io/specification) 的挂载路径可能不同，请以 **Cursor 官方文档**为准。通用原则是：**宿主需要能读到一个包含 `SKILL.md` 的目录**。若当前版本仅支持项目内规则，可临时将 **`SKILL.md` 正文要点**合并进 **`.cursor/rules`** 或项目说明，作为过渡；完整结构仍建议保留导出目录，便于日后一键接入。
+
+### 3. 常见问题
+
+| 现象 | 处理 |
+|------|------|
+| 技能未出现 | 确认路径在 **git 根** 下的 `.claude/skills/<name>`，且 **`name` 与文件夹名相同** |
+| 改名了 skill | 需同时改 **目录名** 与 **`SKILL.md` 里 `name:`**，或重新导出 |
+| 更新人格/记忆 | 在中之我里改画像或再导出，再 **覆盖拷贝** 或刷新软链目标目录 |
 
 ---
 

@@ -42,9 +42,15 @@ def build_skill_markdown(skill_name: str, profile: ProfileState, llm_blocks: dic
         "name": skill_name,
         "description": description,
         "license": "MIT",
+        # Agent Skills 可选字段：标明无捆绑脚本、纯说明型 skill，便于各宿主加载
+        "compatibility": (
+            "Text-only digital-twin skill from Inside-ME. "
+            "No bundled scripts required. Use in Claude Code, Cursor, or any Agent Skills–compatible client."
+        ),
         "metadata": {
             "inside-me-version": "0.1",
             "message-count-estimate": str(profile.message_count),
+            "generator": "inside-me",
         },
     }
     body = f"""# 数字分身（中之我）
