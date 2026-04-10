@@ -1,17 +1,27 @@
 # 中之我.skill
 
-> _「**中之我**——住在界面那一侧、读过你所有聊天记录的那个『我』。借 ta 的嘴，把说不出口的深处，问出来。」_
+> _「**中之我**——住在界面那一侧、读过你所有聊天记录的那个『我』。借 ta 的嘴，把说不出口的话，问出来。」_
 
 **你我生来时就注定天真而伟大**
+
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org)
+[![Claude Code](https://img.shields.io/badge/Claude%20Code-Skill-blueviolet)](https://claude.ai/code)
+[![Agent Skills](https://img.shields.io/badge/Agent%20Skills-Standard-green)](https://agentskills.io)  
+[![FastAPI](https://img.shields.io/badge/FastAPI-API-009688?logo=fastapi)](https://fastapi.tiangolo.com)
+[![React](https://img.shields.io/badge/React-18-61DAFB?logo=react&logoColor=black)](https://react.dev)
+[![Docker](https://img.shields.io/badge/Docker-部署-2496ED?logo=docker&logoColor=white)](https://www.docker.com)
+[![Chroma](https://img.shields.io/badge/Chroma-向量库-FF6B35)](https://www.trychroma.com)
 
 很多话你对别人说了一半，对群聊发完就撤回，在深夜文件传输助手里打满又删掉。**内心深处**的东西，常常没有合适的听众——除了**未来的自己**，和**由过去的只言片语堆出来的那个“你”**。
 
 **中之我（Inside-ME）** 的初衷很简单：**更顺手、更可视化地**，和自己来一场**灵魂层面的问答**。  
 先像 [自己.skill](https://github.com/notdog1998/yourself-skill)、[前任.skill](https://github.com/therealXiaomanChu/ex-skill) 那样，把**原材料**（聊天记录、平台上的你）收进来；再在**本机工作台**里，打开左侧会**亮起来的记忆抽屉**、流式延伸的回复、可钉选、可写回向量库的每一轮对话——**与「中之我」来回深谈**，让**活生生的你**和**这个不断被修正的你**一起变得更完整，最后导出符合 [Agent Skills](https://agentskills.io/specification) 的目录，交给 Cursor、Claude Code 或任何认这份标准的环境。
 
-License: **MIT** · Python **3.11+** · [Agent Skills](https://agentskills.io/specification) · **本地优先**（可选 OpenAI 兼容 API / 火山方舟） · **Docker 可一键部署**
+**本地优先**；对话与嵌入可走 OpenAI 兼容端点或火山方舟。规范说明见 [Agent Skills 规范](https://agentskills.io/specification)。
 
-[安装](#本地安装) · [启动](#启动-api) · [前端](#前端开发) · [导入 Skill](#导入导出的-skill-到-claude-code--cursor) · [数据落盘](#数据存哪儿持久化吗) · [Docker](#docker-一键部署) · [隐私](#隐私说明) · [写在最后](#写在最后)
+[安装](#本地安装) · [启动](#启动-api) · [前端](#前端开发) · [导入 Skill](#导入导出的-skill-到-claude-code--cursor) · [数据落盘](#数据存哪儿持久化吗) · [Docker](#docker-一键部署) · [隐私](#隐私说明) · [写在最后](#写在最后) · **[English README →](README_EN.md)**
 
 ---
 
@@ -248,6 +258,7 @@ docker run -d --name inside-me -p 8080:8000 -v inside_me_data:/data inside-me:lo
 
 ## 仓库结构
 
+- `README.md` / **`README_EN.md`**：中文主文档与英文版
 - `src/inside_me/`：解析、Chroma、画像、Skill、FastAPI、`POST /api/chat` 与 **`POST /api/chat/stream`**
 - `frontend/`：React + Vite（记忆档案、流式、仪表盘）
 - `Dockerfile`、`docker-compose.yml`
@@ -290,4 +301,4 @@ docker run -d --name inside-me -p 8080:8000 -v inside_me_data:/data inside-me:lo
 
 ## 许可证
 
-MIT
+[MIT](LICENSE)
