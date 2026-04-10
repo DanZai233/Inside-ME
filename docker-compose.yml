@@ -11,6 +11,18 @@ services:
       INSIDE_ME_STATIC_DIR: /app/static
       # 浏览器访问的页面来源（与 ports 映射一致时可不改）
       INSIDE_ME_CORS_ORIGINS: "http://localhost:8080,http://127.0.0.1:8080"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request as u; u.urlopen('http://127.0.0.1:8000/health', timeout=5).read()",
+        ]
+      interval: 30s
+      timeout: 6s
+      retries: 3
+      start_period: 60s
     restart: unless-stopped
 
 volumes:

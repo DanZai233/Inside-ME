@@ -58,6 +58,7 @@ export default function App() {
   const [vaultStreaming, setVaultStreaming] = useState(false);
   const [pinnedMemory, setPinnedMemory] = useState<RagHit | null>(null);
   const ragPreviewSeq = useRef(0);
+  const chatLogRef = useRef<HTMLDivElement>(null);
   const [busy, setBusy] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
   const [skillName, setSkillName] = useState("my-inside-me");
@@ -125,6 +126,33 @@ export default function App() {
       ragPreviewSeq.current += 1;
     };
   }, [input, rag, tab]);
+
+  useEffect(() => {
+    if (tab !== "chat") return;
+    const el = chatLogRef.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+  }, [tab, chatMessages]);
+
+  const copyAssistantText = useCallback((text: string) => {
+    void navigator.clipboard.writeText(text).then(
+      () => setToast("已复制到剪贴板"),
+      () => setErr("无法写入剪贴板"),
+    );
+  }, []);
+
+  const copyChatAsMarkdown = useCallback(() => {
+    const parts = chatMessages.filter((m) => m.content.trim());
+    if (parts.length === 0) {
+      setToast("暂无消息可复制");
+      return;
+    }
+    const md = parts.map((m) => `### ${m.role}\n\n${m.content.trim()}\n`).join("\n");
+    void navigator.clipboard.writeText(md).then(
+      () => setToast("已复制整段对话（Markdown）"),
+      () => setErr("无法写入剪贴板"),
+    );
+  }, [chatMessages]);
 
   const platformData = useMemo(() => {
     const p = dash?.profile.platforms ?? {};
@@ -491,22 +519,40 @@ export default function App() {
               />
               <span>深度访谈模式（澄清式提问；非专业心理咨询）</span>
             </label>
-            <div className="chat-log chat-log--framed">
+            <div ref={chatLogRef} className="chat-log chat-log--framed">
               {chatMessages.length === 0 && (
                 <div className="chat-log-placeholder">在「模型设置」中配置 API Key 后开始对话。</div>
               )}
               {chatMessages.map((m, i) => (
                 <div key={i} className={`bubble ${m.role === "user" ? "user" : "assistant"}`}>
-                  <div className="role">{m.role}</div>
-                  {m.content}
+                  <div className="bubble__head">
+                    <div className="role">{m.role}</div>
+                    {m.role === "assistant" && m.content ? (
+                      <button
+                        type="button"
+                        className="bubble-copy"
+                        onClick={() => copyAssistantText(m.content)}
+                      >
+                        复制
+                      </button>
+                    ) : null}
+                  </div>
+                  <div className="bubble__body">{m.content}</div>
                 </div>
               ))}
             </div>
             <textarea
               className="chat-input"
+              rows={5}
               value={input}
               onChange={(e) => setInput(e.target.value)}
-              placeholder="可编辑预置开场白，或自写问题；输入时左侧会预览相关记忆…"
+              onKeyDown={(e) => {
+                if (e.key !== "Enter" || e.shiftKey) return;
+                if (e.nativeEvent.isComposing) return;
+                e.preventDefault();
+                if (!busy) void sendChat();
+              }}
+              placeholder="可编辑预置开场白，或自写问题；输入时左侧会预览相关记忆…（Enter 发送，Shift+Enter 换行）"
             />
             <div className="row chat-actions">
               <button type="button" className="primary" disabled={busy} onClick={() => void sendChat()}>
@@ -519,6 +565,14 @@ export default function App() {
                 title="用默认开场白替换当前输入"
               >
                 填入开场白
+              </button>
+              <button
+                type="button"
+                className="ghost"
+                disabled={chatMessages.length === 0}
+                onClick={() => copyChatAsMarkdown()}
+              >
+                复制对话
               </button>
               <button
                 type="button"
