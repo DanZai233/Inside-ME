@@ -19,6 +19,8 @@
 **中之我（Inside-ME）** 的初衷很简单：**更顺手、更可视化地**，和自己来一场**灵魂层面的问答**。  
 先像 [自己.skill](https://github.com/notdog1998/yourself-skill)、[前任.skill](https://github.com/therealXiaomanChu/ex-skill) 那样，把**原材料**（聊天记录、平台上的你）收进来；再在**本机工作台**里，打开左侧会**亮起来的记忆抽屉**、流式延伸的回复、可钉选、可写回向量库的每一轮对话——**与「中之我」来回深谈**，让**活生生的你**和**这个不断被修正的你**一起变得更完整，最后导出符合 [Agent Skills](https://agentskills.io/specification) 的目录，交给 Cursor、Claude Code 或任何认这份标准的环境。
 
+![对话页面](img_v3_0210p_6c049c7f-5094-4ec8-a4b2-75a3cf5bd08g.jpg)
+
 **本地优先**；对话与嵌入可走 OpenAI 兼容端点或火山方舟。规范说明见 [Agent Skills 规范](https://agentskills.io/specification)。
 
 [安装](#本地安装) · [启动](#启动-api) · [前端](#前端开发) · [导入 Skill](#导入导出的-skill-到-claude-code--cursor) · [数据落盘](#数据存哪儿持久化吗) · [Docker](#docker-一键部署) · [隐私](#隐私说明) · [写在最后](#写在最后) · **[English README →](README_EN.md)**
